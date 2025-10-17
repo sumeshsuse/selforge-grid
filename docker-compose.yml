@@ -1,0 +1,108 @@
+version: "3.9"
+
+services:
+  selenium-hub:
+    image: selenium/hub:4.25.0
+    platform: linux/amd64
+    container_name: selenium-hub
+    ports:
+      - "4444:4444"                # Selenium Grid UI: http://localhost:4444/ui
+    environment:
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    volumes:
+      - ./logs/hub:/opt/selenium/logs
+    healthcheck:
+      # ✅ Check if Selenium hub is listening (not "ready" yet)
+      test: ["CMD", "bash", "-lc", "wget -q --spider http://localhost:4444/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: "local"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  chrome:
+    image: selenium/node-chrome:4.25.0
+    platform: linux/amd64
+    shm_size: 2gb
+    depends_on:
+      selenium-hub:
+        condition: service_healthy
+    environment:
+      - SE_EVENT_BUS_HOST=selenium-hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SCREEN_WIDTH=1920
+      - SE_SCREEN_HEIGHT=1080
+      - SE_SCREEN_DEPTH=24
+      - SE_START_XVFB=true
+      - SE_START_VNC=true
+      - SE_NO_VNC_PORT=7900
+      - SE_VNC_PORT=5900
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    ports:
+      - "7900:7900"   # noVNC (http://localhost:7900 ; password: secret)
+    volumes:
+      - ./logs/chrome:/opt/selenium/logs
+      - ./downloads/chrome:/home/seluser/Downloads
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+    restart: unless-stopped
+    logging:
+      driver: "local"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  firefox:
+    image: selenium/node-firefox:4.25.0
+    platform: linux/amd64
+    shm_size: 2gb
+    depends_on:
+      selenium-hub:
+        condition: service_healthy
+    environment:
+      - SE_EVENT_BUS_HOST=selenium-hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SCREEN_WIDTH=1920
+      - SE_SCREEN_HEIGHT=1080
+      - SE_SCREEN_DEPTH=24
+      - SE_START_XVFB=true
+      - SE_START_VNC=true
+      - SE_NO_VNC_PORT=7901
+      - SE_VNC_PORT=5901
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    ports:
+      - "7901:7901"   # noVNC for Firefox (http://localhost:7901 ; password: secret)
+    volumes:
+      - ./logs/firefox:/opt/selenium/logs
+      - ./downloads/firefox:/home/seluser/Downloads
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+    restart: unless-stopped
+    logging:
+      driver: "local"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  logs:
+  downloads:
