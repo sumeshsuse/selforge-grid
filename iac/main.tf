@@ -9,184 +9,72 @@ terraform {
 }
 
 provider "aws" {
-  # Region comes from AWS_REGION env (set by GitHub Actions OIDC)
+  # Region comes from AWS_REGION env / OIDC in the workflow
 }
 
-########################
-# Networking (default) #
-########################
-data "aws_vpc" "default" {
-  default = true
+module "selenium_grid" {
+  source = "./modules/selenium_grid"
+
+  # Required / common vars
+  instance_type        = var.instance_type
+  create_key_pair      = var.create_key_pair
+  ssh_public_key_path  = var.ssh_public_key_path
+  ssh_cidrs            = var.ssh_cidrs
+  grid_cidrs           = var.grid_cidrs
+
+  # Optional DNS (leave null to disable)
+  route53_zone_id      = var.route53_zone_id
+  route53_record_name  = var.route53_record_name
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
+# ——— Re-export handy outputs ———
+output "instance_id"      { value = module.selenium_grid.instance_id }
+output "public_ip"        { value = module.selenium_grid.public_ip }
+output "public_dns"       { value = module.selenium_grid.public_dns }
+output "security_group_id"{ value = module.selenium_grid.security_group_id }
+output "grid_url"         { value = module.selenium_grid.grid_url }
+output "novnc_url_chrome" { value = module.selenium_grid.novnc_url_chrome }
+output "route53_fqdn"     { value = module.selenium_grid.route53_fqdn }
+
+# Root-level variables (kept in sync with module)
+variable "create_key_pair" {
+  description = "Whether to create an ephemeral EC2 key pair from provided public key"
+  type        = bool
+  default     = true
 }
 
-#################
-# Key pair (opt)#
-#################
-resource "aws_key_pair" "gha" {
-  count      = var.create_key_pair ? 1 : 0
-  key_name   = "gha-ephemeral"
-  public_key = file(var.ssh_public_key_path)
+variable "ssh_public_key_path" {
+  description = "Path to a public key file (used when create_key_pair=true)"
+  type        = string
+  default     = "~/.ssh/id_rsa.pub"
 }
 
-########################
-# Security group rules #
-########################
-resource "aws_security_group" "grid_sg" {
-  name        = "selenium-grid-sg"
-  description = "Allow Selenium Grid and optional SSH"
-  vpc_id      = data.aws_vpc.default.id
-
-  # SSH (22) — controlled by ssh_cidrs
-  dynamic "ingress" {
-    for_each = var.ssh_cidrs
-    content {
-      description = "SSH"
-      from_port   = 22
-      to_port     = 22
-      protocol    = "tcp"
-      cidr_blocks = [ingress.value]
-    }
-  }
-
-  # Grid (4444) — controlled by grid_cidrs
-  dynamic "ingress" {
-    for_each = var.grid_cidrs
-    content {
-      description = "Selenium Grid"
-      from_port   = 4444
-      to_port     = 4444
-      protocol    = "tcp"
-      cidr_blocks = [ingress.value]
-    }
-  }
-
-  # noVNC (7900)
-  dynamic "ingress" {
-    for_each = var.grid_cidrs
-    content {
-      description = "noVNC"
-      from_port   = 7900
-      to_port     = 7900
-      protocol    = "tcp"
-      cidr_blocks = [ingress.value]
-    }
-  }
-
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "selenium-grid-sg"
-  }
+variable "ssh_cidrs" {
+  description = "CIDR blocks allowed to SSH (22)"
+  type        = list(string)
+  default     = []
 }
 
-###########################
-# AMI (Amazon Linux 2023) #
-###########################
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }
+variable "grid_cidrs" {
+  description = "CIDR blocks allowed to reach Selenium Grid (4444) and noVNC (7900)"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }
 
-#####################
-# EC2 for the grid  #
-#####################
-resource "aws_instance" "grid" {
-  ami                         = data.aws_ami.al2023.id
-  instance_type               = var.instance_type
-  subnet_id                   = data.aws_subnets.default.ids[0]
-  vpc_security_group_ids      = [aws_security_group.grid_sg.id]
-  associate_public_ip_address = true
-
-  key_name = var.create_key_pair ? aws_key_pair.gha[0].key_name : null
-
-  user_data_replace_on_change = true
-  user_data = <<'BASH'
-#!/bin/bash
-set -euxo pipefail
-exec > >(tee -a /var/log/user-data.log) 2>&1
-
-echo "[user-data] bootstrap $(date -Iseconds)"
-
-# Amazon Linux 2023 → avoid curl vs curl-minimal conflict
-dnf -y makecache
-dnf -y install jq docker
-
-systemctl enable docker
-systemctl start docker
-usermod -aG docker ec2-user || true
-
-# Pull and run Selenium Standalone Chrome
-SEL_VER="4.25.0"
-docker pull selenium/standalone-chrome:${SEL_VER}
-
-docker rm -f selenium || true
-docker run -d --name selenium --restart unless-stopped --net host \
--e SE_NODE_MAX_SESSIONS=1 \
--e SE_NODE_OVERRIDE_MAX_SESSIONS=true \
-selenium/standalone-chrome:${SEL_VER}
-
-# Wait until Grid is ready
-for i in $(seq 1 60); do
-if curl -fsS http://localhost:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
-echo "[user-data] Selenium Grid is ready."
-exit 0
-fi
-echo "[user-data] Waiting for Selenium Grid... ($i/60)"
-sleep 5
-done
-
-echo "[user-data] Grid did not become ready in time." >&2
-exit 1
-BASH
-
-tags = {
-Name = "selenium-grid"
+variable "instance_type" {
+  description = "EC2 instance type for the grid"
+  type        = string
+  default     = "t3.large"
 }
 
-root_block_device {
-volume_size = 16
-volume_type = "gp3"
-encrypted   = true
-}
-}
-
-##################
-# Elastic IP (opt)
-##################
-resource "aws_eip" "grid" {
-count = 0 # set to 1 later if you want static IP
-instance = aws_instance.grid.id
-vpc      = true
-depends_on = [aws_instance.grid]
+variable "route53_zone_id" {
+  description = "Optional Route53 hosted zone ID to create a DNS record"
+  type        = string
+  default     = null
 }
 
-##################
-# Route 53 (opt) #
-##################
-resource "aws_route53_record" "grid" {
-count   = 0 # set to 1 if DNS desired
-zone_id = var.route53_zone_id
-name    = var.route53_record_name
-type    = "A"
-ttl     = 300
-records = [coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)]
+variable "route53_record_name" {
+  description = "Optional DNS name for Selenium Grid (e.g., grid.example.com)"
+  type        = string
+  default     = null
 }
-
