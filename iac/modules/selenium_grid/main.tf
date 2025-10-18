@@ -232,7 +232,7 @@ resource "aws_instance" "grid" {
   }
 
   user_data_replace_on_change = true
-  user_data = <<'EOF'
+  user_data = <<EOF
 #!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
@@ -250,7 +250,7 @@ docker version || (systemctl status docker || true)
 # Create a dedicated Docker network for Grid (idempotent)
 docker network create grid || true
 
-# Pull images (explicit, to fail early if networking is broken)
+# Pull images (explicit)
 docker pull selenium/hub:4.25.0
 docker pull selenium/node-chrome:4.25.0
 docker pull selenium/node-firefox:4.25.0
@@ -258,65 +258,65 @@ docker pull selenium/node-firefox:4.25.0
 # Run Hub
 docker rm -f selenium-hub || true
 docker run -d --restart=unless-stopped --name selenium-hub --network grid \
--p 4444:4444 \
--e SE_OPTS="--relax-checks true" \
--e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
-selenium/hub:4.25.0
+  -p 4444:4444 \
+  -e SE_OPTS="--relax-checks true" \
+  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+  selenium/hub:4.25.0
 
 # Wait for hub port + /status
 echo "[user-data] wait for hub 4444..."
 for i in $(seq 1 120); do
-if timeout 2 bash -lc "cat </dev/null >/dev/tcp/127.0.0.1/4444" 2>/dev/null; then
-READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
-if [ "${READY}" = "true" ]; then
-echo "[user-data] hub is ready"
-break
-fi
-echo "[user-data] 4444 open, but hub not ready yet... ($i/120)"
-else
-echo "[user-data] 4444 not open yet... ($i/120)"
-fi
-sleep 5
+  if timeout 2 bash -lc "cat </dev/null >/dev/tcp/127.0.0.1/4444" 2>/dev/null; then
+    READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
+    if [ "$READY" = "true" ]; then
+      echo "[user-data] hub is ready"
+      break
+    fi
+    echo "[user-data] 4444 open, but hub not ready yet... ($i/120)"
+  else
+    echo "[user-data] 4444 not open yet... ($i/120)"
+  fi
+  sleep 5
 done
 
 # Start Chrome node (expose noVNC 7900)
 docker rm -f node-chrome || true
 docker run -d --restart=unless-stopped --name node-chrome --network grid \
--p 7900:7900 \
--e SE_EVENT_BUS_HOST=selenium-hub \
--e SE_EVENT_BUS_PUBLISH_PORT=4442 \
--e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
--e SE_NODE_MAX_SESSIONS=1 \
--e SE_SCREEN_WIDTH=1920 \
--e SE_SCREEN_HEIGHT=1080 \
--e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
---shm-size="2g" \
-selenium/node-chrome:4.25.0
+  -p 7900:7900 \
+  -e SE_EVENT_BUS_HOST=selenium-hub \
+  -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+  -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+  -e SE_NODE_MAX_SESSIONS=1 \
+  -e SE_SCREEN_WIDTH=1920 \
+  -e SE_SCREEN_HEIGHT=1080 \
+  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+  --shm-size="2g" \
+  selenium/node-chrome:4.25.0
 
 # Start Firefox node
 docker rm -f node-firefox || true
 docker run -d --restart=unless-stopped --name node-firefox --network grid \
--e SE_EVENT_BUS_HOST=selenium-hub \
--e SE_EVENT_BUS_PUBLISH_PORT=4442 \
--e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
--e SE_NODE_MAX_SESSIONS=1 \
--e SE_SCREEN_WIDTH=1920 \
--e SE_SCREEN_HEIGHT=1080 \
--e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
---shm-size="2g" \
-selenium/node-firefox:4.25.0
+  -e SE_EVENT_BUS_HOST=selenium-hub \
+  -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+  -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+  -e SE_NODE_MAX_SESSIONS=1 \
+  -e SE_SCREEN_WIDTH=1920 \
+  -e SE_SCREEN_HEIGHT=1080 \
+  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+  --shm-size="2g" \
+  selenium/node-firefox:4.25.0
 
 echo "[user-data] containers:"
 docker ps -a
 
 # Final readiness verify (up to 10 min)
 for i in $(seq 1 120); do
-READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
-if [ "${READY}" = "true" ]; then
-echo "[user-data] Grid READY ✅"
-exit 0
-fi
-sleep 5
+  READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
+  if [ "$READY" = "true" ]; then
+    echo "[user-data] Grid READY ✅"
+    exit 0
+  fi
+  sleep 5
 done
 
 echo "[user-data] Grid NOT ready ❌. Dumping status and logs."
@@ -327,62 +327,62 @@ docker logs node-firefox || true
 exit 1
 EOF
 
-tags = {
-Name = "${var.name_prefix}-ec2"
-}
+  tags = {
+    Name = "${var.name_prefix}-ec2"
+  }
 }
 
 #############
 # Optional EIP / DNS
 #############
 resource "aws_eip" "grid" {
-count  = var.create_eip ? 1 : 0
-domain = "vpc"
-tags = {
-Name = "${var.name_prefix}-eip"
-}
+  count  = var.create_eip ? 1 : 0
+  domain = "vpc"
+  tags = {
+    Name = "${var.name_prefix}-eip"
+  }
 }
 
 resource "aws_eip_association" "grid" {
-count         = var.create_eip ? 1 : 0
-instance_id   = aws_instance.grid.id
-allocation_id = aws_eip.grid[0].id
+  count         = var.create_eip ? 1 : 0
+  instance_id   = aws_instance.grid.id
+  allocation_id = aws_eip.grid[0].id
 }
 
 resource "aws_route53_record" "grid" {
-count   = var.create_route53 ? 1 : 0
-zone_id = var.hosted_zone_id
-name    = var.dns_name
-type    = "A"
-ttl     = 60
-records = [
-var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
-]
+  count   = var.create_route53 ? 1 : 0
+  zone_id = var.hosted_zone_id
+  name    = var.dns_name
+  type    = "A"
+  ttl     = 60
+  records = [
+    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
+  ]
 }
 
 #########
 # Outputs
 #########
 output "public_ip" {
-value = aws_instance.grid.public_ip
+  value = aws_instance.grid.public_ip
 }
 
 output "public_dns" {
-value = aws_instance.grid.public_dns
+  value = aws_instance.grid.public_dns
 }
 
 output "instance_id" {
-value = aws_instance.grid.id
+  value = aws_instance.grid.id
 }
 
 output "security_group_id" {
-value = aws_security_group.grid_sg.id
+  value = aws_security_group.grid_sg.id
 }
 
 output "grid_url" {
-value = "http://${aws_instance.grid.public_ip}:4444"
+  value = "http://${aws_instance.grid.public_ip}:4444"
 }
 
 output "novnc_url" {
-value = "http://${aws_instance.grid.public_ip}:7900"
+  value = "http://${aws_instance.grid.public_ip}:7900"
 }
