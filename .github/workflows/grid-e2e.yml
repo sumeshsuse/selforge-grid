@@ -160,7 +160,6 @@ jobs:
     env:
       GRID_URL:  ${{ needs.terraform_apply.outputs.grid_url }}
       PUBLIC_IP: ${{ needs.terraform_apply.outputs.public_ip }}
-      AWS_REGION: ${{ env.AWS_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -231,7 +230,6 @@ jobs:
           GRID_URL: ${{ env.GRID_URL }}
         shell: bash
         run: |
-          # Prefer -Dgrid.url; your DuckTest also falls back to env GRID_URL.
           mvn -B -Dgrid.url="$GRID_URL" test
 
       - name: Archive TestNG reports (always)
