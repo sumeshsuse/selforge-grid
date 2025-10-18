@@ -1,33 +1,80 @@
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
   }
 }
 
 ################
 # Module inputs
 ################
-variable "name_prefix"     { type = string  default = "selenium-grid" }
-variable "instance_type"   { type = string  default = "t3.large" }
-variable "volume_size_gb"  { type = number  default = 35 }
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
+}
+
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
+
+variable "volume_size_gb" {
+  type    = number
+  default = 35
+}
 
 variable "key_name" {
   type        = string
   default     = null
-  description = "Existing key pair name (or null)"
+  description = "Existing EC2 key pair name (or null)"
 }
 
-variable "vpc_id"          { type = string  default = null }
-variable "subnet_id"       { type = string  default = null }
+variable "vpc_id" {
+  type    = string
+  default = null
+}
 
-variable "ssh_cidrs"  { type = list(string) default = [] }
-variable "grid_cidrs" { type = list(string) default = ["0.0.0.0/0"] }
+variable "subnet_id" {
+  type    = string
+  default = null
+}
 
-variable "create_iam_role" { type = bool default = false }
-variable "create_eip"      { type = bool default = false }
-variable "create_route53"  { type = bool default = false }
-variable "hosted_zone_id"  { type = string default = null }
-variable "dns_name"        { type = string default = null }
+variable "ssh_cidrs" {
+  type    = list(string)
+  default = []
+}
+
+variable "grid_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+variable "create_iam_role" {
+  type    = bool
+  default = false
+}
+
+variable "create_eip" {
+  type    = bool
+  default = false
+}
+
+variable "create_route53" {
+  type    = bool
+  default = false
+}
+
+variable "hosted_zone_id" {
+  type    = string
+  default = null
+}
+
+variable "dns_name" {
+  type    = string
+  default = null
+}
 
 #############
 # Networking
@@ -60,8 +107,15 @@ data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
-  filter { name = "name"          values = ["al2023-ami-*-kernel-6.1-x86_64"] }
-  filter { name = "architecture"  values = ["x86_64"] }
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-kernel-6.1-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 
 #####################
@@ -117,7 +171,9 @@ resource "aws_security_group" "grid_sg" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = { Name = "${var.name_prefix}-sg" }
+  tags = {
+    Name = "${var.name_prefix}-sg"
+  }
 }
 
 ############
@@ -126,7 +182,11 @@ resource "aws_security_group" "grid_sg" {
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-    principals { type = "Service", identifiers = ["ec2.amazonaws.com"] }
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
   }
 }
 
@@ -179,9 +239,8 @@ set -euxo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
 echo "[user-data] start $(date -Iseconds)"
 
-# packages
 dnf -y makecache
-dnf -y install docker curl wget
+dnf -y install docker curl wget jq
 
 systemctl enable --now docker
 sleep 3
@@ -224,7 +283,9 @@ services:
     restart: unless-stopped
     logging:
       driver: local
-      options: { max-size: "10m", max-file: "3" }
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   chrome:
     image: selenium/node-chrome:4.25.0
@@ -248,11 +309,16 @@ services:
     volumes:
       - "./logs/chrome:/opt/selenium/logs"
       - "./downloads/chrome:/home/seluser/Downloads"
-    ulimits: { nofile: { soft: 32768, hard: 32768 } }
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
     restart: unless-stopped
     logging:
       driver: local
-      options: { max-size: "10m", max-file: "3" }
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   firefox:
     image: selenium/node-firefox:4.25.0
@@ -274,11 +340,16 @@ services:
     volumes:
       - "./logs/firefox:/opt/selenium/logs"
       - "./downloads/firefox:/home/seluser/Downloads"
-    ulimits: { nofile: { soft: 32768, hard: 32768 } }
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
     restart: unless-stopped
     logging:
       driver: local
-      options: { max-size: "10m", max-file: "3" }
+      options:
+        max-size: "10m"
+        max-file: "3"
 YAML
 
 echo "[user-data] docker pull + up"
@@ -305,7 +376,9 @@ docker ps -a
 exit 1
 EOF
 
-  tags = { Name = "${var.name_prefix}-ec2" }
+  tags = {
+    Name = "${var.name_prefix}-ec2"
+  }
 }
 
 #############
@@ -314,7 +387,9 @@ EOF
 resource "aws_eip" "grid" {
   count  = var.create_eip ? 1 : 0
   domain = "vpc"
-  tags   = { Name = "${var.name_prefix}-eip" }
+  tags = {
+    Name = "${var.name_prefix}-eip"
+  }
 }
 
 resource "aws_eip_association" "grid" {
@@ -329,15 +404,34 @@ resource "aws_route53_record" "grid" {
   name    = var.dns_name
   type    = "A"
   ttl     = 60
-  records = [var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip]
+  records = [
+    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
+  ]
 }
 
 #########
 # Outputs
 #########
-output "public_ip"         { value = aws_instance.grid.public_ip }
-output "public_dns"        { value = aws_instance.grid.public_dns }
-output "instance_id"       { value = aws_instance.grid.id }
-output "security_group_id" { value = aws_security_group.grid_sg.id }
-output "grid_url"          { value = "http://${aws_instance.grid.public_ip}:4444" }
-output "novnc_url"         { value = "http://${aws_instance.grid.public_ip}:7900" }
+output "public_ip" {
+  value = aws_instance.grid.public_ip
+}
+
+output "public_dns" {
+  value = aws_instance.grid.public_dns
+}
+
+output "instance_id" {
+  value = aws_instance.grid.id
+}
+
+output "security_group_id" {
+  value = aws_security_group.grid_sg.id
+}
+
+output "grid_url" {
+  value = "http://${aws_instance.grid.public_ip}:4444"
+}
+
+output "novnc_url" {
+  value = "http://${aws_instance.grid.public_ip}:7900"
+}
