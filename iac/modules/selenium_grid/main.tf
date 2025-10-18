@@ -141,7 +141,7 @@ resource "aws_instance" "grid" {
   iam_instance_profile = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
 
   root_block_device {
-    volume_size = var.volume_size_gb      # ← FIXED: was 16 GB, now uses variable (default 35)
+    volume_size = var.volume_size_gb
     volume_type = "gp3"
   }
 
@@ -206,39 +206,103 @@ resource "aws_route53_record" "grid" {
 }
 
 # ── Outputs ────────────────────────────────────────────────────────────────────
-output "instance_id"        { value = aws_instance.grid.id }
-output "public_ip"          { value = coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip) }
-output "public_dns"         { value = aws_instance.grid.public_dns }
-output "security_group_id"  { value = aws_security_group.grid_sg.id }
-output "grid_url"           { value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:4444" }
-output "novnc_url_chrome"   { value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:7900" }
+output "instance_id" {
+  value = aws_instance.grid.id
+}
+
+output "public_ip" {
+  value = coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)
+}
+
+output "public_dns" {
+  value = aws_instance.grid.public_dns
+}
+
+output "security_group_id" {
+  value = aws_security_group.grid_sg.id
+}
+
+output "grid_url" {
+  value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:4444"
+}
+
+output "novnc_url_chrome" {
+  value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:7900"
+}
+
 output "route53_fqdn" {
   value       = try(aws_route53_record.grid[0].fqdn, null)
   description = "DNS name if Route53 record created"
 }
 
 # ── Variables ──────────────────────────────────────────────────────────────────
-variable "name_prefix"     { type = string  default = "selenium-grid" }
-variable "instance_type"   { type = string  default = "t3.large" }
-variable "volume_size_gb"  { type = number  default = 35 }   # ← new variable for root volume
-variable "vpc_id"          { type = string  default = null }
-variable "subnet_id"       { type = string  default = null }
-variable "key_name"        { type = string  default = null }
-variable "create_iam_role" { type = bool    default = false }
-variable "create_eip"      { type = bool    default = false }
-variable "create_route53"  { type = bool    default = false }
-variable "hosted_zone_id"  { type = string  default = null }
-variable "dns_name"        { type = string  default = null }
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
+}
+
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
+
+variable "volume_size_gb" {
+  type    = number
+  default = 35
+}
+
+variable "vpc_id" {
+  type    = string
+  default = null
+}
+
+variable "subnet_id" {
+  type    = string
+  default = null
+}
+
+variable "key_name" {
+  type    = string
+  default = null
+}
+
+variable "create_iam_role" {
+  type    = bool
+  default = false
+}
+
+variable "create_eip" {
+  type    = bool
+  default = false
+}
+
+variable "create_route53" {
+  type    = bool
+  default = false
+}
+
+variable "hosted_zone_id" {
+  type    = string
+  default = null
+}
+
+variable "dns_name" {
+  type    = string
+  default = null
+}
+
 variable "ssh_cidrs" {
   description = "CIDR blocks allowed SSH (22)"
   type        = list(string)
   default     = []
 }
+
 variable "grid_cidrs" {
   description = "CIDR blocks allowed to reach Grid (4444) & noVNC (7900)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
 variable "my_ip_cidr" {
   description = "Convenience: your /32. Used if ssh_cidrs/grid_cidrs empty"
   type        = string
