@@ -161,7 +161,6 @@ jobs:
       contents: read
     env:
       GRID_URL: ${{ needs.terraform_apply.outputs.grid_url }}
-      AWS_REGION: ${{ env.AWS_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -196,7 +195,6 @@ jobs:
             --query 'Reservations[].Instances[].InstanceId' --output text || true)"
           if [ -n "$IID" ] && [ "$IID" != "None" ]; then
             echo "Found instance: $IID. Waiting for instance-status-ok…"
-            # Do not fail the job if this waiter times out; it's just to reduce flakiness.
             aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$IID" || true
           else
             echo "Could not resolve instance by IP. Continuing without EC2 waiter."
