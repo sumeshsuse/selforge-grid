@@ -16,6 +16,9 @@
         <surefire.version>3.2.5</surefire.version>
         <allure.testng.version>2.26.0</allure.testng.version>
         <allure.maven.version>2.12.0</allure.maven.version>
+        <!-- Optional: the Allure REPORT version (not the maven plugin).
+             You can bump this independently if needed. -->
+        <allure.report.version>2.29.0</allure.report.version>
     </properties>
 
     <dependencies>
@@ -63,7 +66,7 @@
                 </configuration>
             </plugin>
 
-            <!-- Run TestNG suite and forward -DgridUrl / -Dgrid.url -->
+            <!-- Run TestNG suite and forward grid url properties -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
@@ -74,11 +77,9 @@
                     </suiteXmlFiles>
                     <systemPropertyVariables>
                         <!-- These mirror whatever you pass with -D... -->
-                        <gridUrl>${gridUrl}</gridUrl>
                         <grid.url>${grid.url}</grid.url>
+                        <GRID_URL>${GRID_URL}</GRID_URL>
                     </systemPropertyVariables>
-                    <!-- Optional: re-run flaky tests once -->
-                    <!-- <rerunFailingTestsCount>1</rerunFailingTestsCount> -->
                 </configuration>
             </plugin>
 
@@ -88,7 +89,7 @@
                 <artifactId>allure-maven</artifactId>
                 <version>${allure.maven.version}</version>
                 <configuration>
-                    <reportVersion>${allure.maven.version}</reportVersion>
+                    <reportVersion>${allure.report.version}</reportVersion>
                     <resultsDirectory>${project.build.directory}/allure-results</resultsDirectory>
                     <reportDirectory>${project.build.directory}/site/allure-maven</reportDirectory>
                 </configuration>
