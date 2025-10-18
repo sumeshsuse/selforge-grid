@@ -126,7 +126,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Allow Selenium Grid and optional SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH 22
+  # SSH 22 (only if provided)
   dynamic "ingress" {
     for_each = local.ssh_allow
     content {
@@ -142,7 +142,7 @@ resource "aws_security_group" "grid_sg" {
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
-      description = "Grid"
+      description = "Grid Hub"
       from_port   = 4444
       to_port     = 4444
       protocol    = "tcp"
@@ -150,7 +150,7 @@ resource "aws_security_group" "grid_sg" {
     }
   }
 
-  # noVNC 7900
+  # noVNC 7900 (Chrome node)
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
@@ -182,7 +182,6 @@ resource "aws_security_group" "grid_sg" {
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-
     principals {
       type        = "Service"
       identifiers = ["ec2.amazonaws.com"]
@@ -233,205 +232,157 @@ resource "aws_instance" "grid" {
   }
 
   user_data_replace_on_change = true
-  user_data = <<EOF
+  user_data = <<'EOF'
 #!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
 echo "[user-data] start $(date -Iseconds)"
 
+# Install Docker (Amazon Linux 2023)
 dnf -y makecache
 dnf -y install docker curl wget jq
 
+# Enable and start Docker
 systemctl enable --now docker
 sleep 3
+docker version || (systemctl status docker || true)
 
-# docker compose v2
-mkdir -p /usr/local/lib/docker/cli-plugins
-curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-docker compose version || true
+# Create a dedicated Docker network for Grid (idempotent)
+docker network create grid || true
 
-# folders
-mkdir -p /opt/grid/logs/hub /opt/grid/logs/chrome /opt/grid/logs/firefox
-mkdir -p /opt/grid/downloads/chrome /opt/grid/downloads/firefox
-cd /opt/grid
+# Pull images (explicit, to fail early if networking is broken)
+docker pull selenium/hub:4.25.0
+docker pull selenium/node-chrome:4.25.0
+docker pull selenium/node-firefox:4.25.0
 
-# compose file
-cat > /opt/grid/docker-compose.yml <<'YAML'
-version: "3.9"
-services:
-  selenium-hub:
-    image: selenium/hub:4.25.0
-    platform: linux/amd64
-    container_name: selenium-hub
-    ports:
-      - "4444:4444"
-    environment:
-      - SE_OPTS=--relax-checks true
-      - OTEL_TRACES_EXPORTER=none
-      - OTEL_METRICS_EXPORTER=none
-      - OTEL_LOGS_EXPORTER=none
-    volumes:
-      - "./logs/hub:/opt/selenium/logs"
-    healthcheck:
-      test: ["CMD", "bash", "-lc", "wget -q --spider http://localhost:4444/status"]
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 10s
-    restart: unless-stopped
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+# Run Hub
+docker rm -f selenium-hub || true
+docker run -d --restart=unless-stopped --name selenium-hub --network grid \
+-p 4444:4444 \
+-e SE_OPTS="--relax-checks true" \
+-e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+selenium/hub:4.25.0
 
-  chrome:
-    image: selenium/node-chrome:4.25.0
-    platform: linux/amd64
-    shm_size: 2gb
-    depends_on:
-      selenium-hub:
-        condition: service_healthy
-    environment:
-      - SE_EVENT_BUS_HOST=selenium-hub
-      - SE_EVENT_BUS_PUBLISH_PORT=4442
-      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
-      - SE_NODE_MAX_SESSIONS=1
-      - SE_SCREEN_WIDTH=1920
-      - SE_SCREEN_HEIGHT=1080
-      - OTEL_TRACES_EXPORTER=none
-      - OTEL_METRICS_EXPORTER=none
-      - OTEL_LOGS_EXPORTER=none
-    ports:
-      - "7900:7900"
-    volumes:
-      - "./logs/chrome:/opt/selenium/logs"
-      - "./downloads/chrome:/home/seluser/Downloads"
-    ulimits:
-      nofile:
-        soft: 32768
-        hard: 32768
-    restart: unless-stopped
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  firefox:
-    image: selenium/node-firefox:4.25.0
-    platform: linux/amd64
-    shm_size: 2gb
-    depends_on:
-      selenium-hub:
-        condition: service_healthy
-    environment:
-      - SE_EVENT_BUS_HOST=selenium-hub
-      - SE_EVENT_BUS_PUBLISH_PORT=4442
-      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
-      - SE_NODE_MAX_SESSIONS=1
-      - SE_SCREEN_WIDTH=1920
-      - SE_SCREEN_HEIGHT=1080
-      - OTEL_TRACES_EXPORTER=none
-      - OTEL_METRICS_EXPORTER=none
-      - OTEL_LOGS_EXPORTER=none
-    volumes:
-      - "./logs/firefox:/opt/selenium/logs"
-      - "./downloads/firefox:/home/seluser/Downloads"
-    ulimits:
-      nofile:
-        soft: 32768
-        hard: 32768
-    restart: unless-stopped
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-YAML
-
-echo "[user-data] docker pull + up"
-docker compose -f /opt/grid/docker-compose.yml pull
-docker compose -f /opt/grid/docker-compose.yml up -d
-
-echo "[user-data] docker ps after up:"
-docker ps -a
-
-# Wait for hub
-echo "[user-data] waiting for hub readiness..."
+# Wait for hub port + /status
+echo "[user-data] wait for hub 4444..."
 for i in $(seq 1 120); do
-  if curl -fsS http://localhost:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
-    echo "[user-data] hub is ready"
-    exit 0
-  fi
-  sleep 5
+if timeout 2 bash -lc "cat </dev/null >/dev/tcp/127.0.0.1/4444" 2>/dev/null; then
+READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
+if [ "${READY}" = "true" ]; then
+echo "[user-data] hub is ready"
+break
+fi
+echo "[user-data] 4444 open, but hub not ready yet... ($i/120)"
+else
+echo "[user-data] 4444 not open yet... ($i/120)"
+fi
+sleep 5
 done
 
-echo "[user-data] hub NOT ready; last /status:"
-curl -v http://localhost:4444/status || true
-echo "[user-data] docker ps (final):"
+# Start Chrome node (expose noVNC 7900)
+docker rm -f node-chrome || true
+docker run -d --restart=unless-stopped --name node-chrome --network grid \
+-p 7900:7900 \
+-e SE_EVENT_BUS_HOST=selenium-hub \
+-e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+-e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+-e SE_NODE_MAX_SESSIONS=1 \
+-e SE_SCREEN_WIDTH=1920 \
+-e SE_SCREEN_HEIGHT=1080 \
+-e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+--shm-size="2g" \
+selenium/node-chrome:4.25.0
+
+# Start Firefox node
+docker rm -f node-firefox || true
+docker run -d --restart=unless-stopped --name node-firefox --network grid \
+-e SE_EVENT_BUS_HOST=selenium-hub \
+-e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+-e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+-e SE_NODE_MAX_SESSIONS=1 \
+-e SE_SCREEN_WIDTH=1920 \
+-e SE_SCREEN_HEIGHT=1080 \
+-e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
+--shm-size="2g" \
+selenium/node-firefox:4.25.0
+
+echo "[user-data] containers:"
 docker ps -a
+
+# Final readiness verify (up to 10 min)
+for i in $(seq 1 120); do
+READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
+if [ "${READY}" = "true" ]; then
+echo "[user-data] Grid READY ✅"
+exit 0
+fi
+sleep 5
+done
+
+echo "[user-data] Grid NOT ready ❌. Dumping status and logs."
+curl -v http://127.0.0.1:4444/status || true
+docker logs selenium-hub || true
+docker logs node-chrome || true
+docker logs node-firefox || true
 exit 1
 EOF
 
-  tags = {
-    Name = "${var.name_prefix}-ec2"
-  }
+tags = {
+Name = "${var.name_prefix}-ec2"
+}
 }
 
 #############
 # Optional EIP / DNS
 #############
 resource "aws_eip" "grid" {
-  count  = var.create_eip ? 1 : 0
-  domain = "vpc"
-  tags = {
-    Name = "${var.name_prefix}-eip"
-  }
+count  = var.create_eip ? 1 : 0
+domain = "vpc"
+tags = {
+Name = "${var.name_prefix}-eip"
+}
 }
 
 resource "aws_eip_association" "grid" {
-  count         = var.create_eip ? 1 : 0
-  instance_id   = aws_instance.grid.id
-  allocation_id = aws_eip.grid[0].id
+count         = var.create_eip ? 1 : 0
+instance_id   = aws_instance.grid.id
+allocation_id = aws_eip.grid[0].id
 }
 
 resource "aws_route53_record" "grid" {
-  count   = var.create_route53 ? 1 : 0
-  zone_id = var.hosted_zone_id
-  name    = var.dns_name
-  type    = "A"
-  ttl     = 60
-  records = [
-    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
-  ]
+count   = var.create_route53 ? 1 : 0
+zone_id = var.hosted_zone_id
+name    = var.dns_name
+type    = "A"
+ttl     = 60
+records = [
+var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
+]
 }
 
 #########
 # Outputs
 #########
 output "public_ip" {
-  value = aws_instance.grid.public_ip
+value = aws_instance.grid.public_ip
 }
 
 output "public_dns" {
-  value = aws_instance.grid.public_dns
+value = aws_instance.grid.public_dns
 }
 
 output "instance_id" {
-  value = aws_instance.grid.id
+value = aws_instance.grid.id
 }
 
 output "security_group_id" {
-  value = aws_security_group.grid_sg.id
+value = aws_security_group.grid_sg.id
 }
 
 output "grid_url" {
-  value = "http://${aws_instance.grid.public_ip}:4444"
+value = "http://${aws_instance.grid.public_ip}:4444"
 }
 
 output "novnc_url" {
-  value = "http://${aws_instance.grid.public_ip}:7900"
+value = "http://${aws_instance.grid.public_ip}:7900"
 }
