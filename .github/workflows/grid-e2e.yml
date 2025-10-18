@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       grid_cidrs:
-        description: 'CIDRs allowed to access Selenium Grid (4444/7900)'
+        description: "CIDRs allowed to access Selenium Grid (4444/7900)"
         required: false
         default: '["0.0.0.0/0"]'
       ssh_cidrs:
-        description: 'CIDRs allowed to SSH (22); keep empty in CI'
+        description: "CIDRs allowed to SSH (22); keep empty in CI"
         required: false
-        default: '[]'
+        default: "[]"
   push:
     branches: [ "main" ]
     paths:
@@ -27,8 +27,6 @@ concurrency:
 env:
   AWS_REGION: us-east-1
   IAC_DIR: iac
-
-  # Remote state config (set these as repo secrets)
   TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
   TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
   TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
@@ -64,13 +62,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Bootstrap remote state backend (idempotent)
+        shell: bash
         run: |
           set -euo pipefail
           if [ -z "${TF_STATE_BUCKET}" ] || [ -z "${TF_STATE_REGION}" ] || [ -z "${TF_STATE_LOCK_TABLE}" ]; then
             echo "ERROR: TF_STATE_BUCKET / TF_STATE_REGION / TF_STATE_LOCK_TABLE must be set as repo secrets." >&2
             exit 1
           fi
-          # Create S3 bucket if needed
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
             if [ "${TF_STATE_REGION}" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
@@ -82,7 +80,6 @@ jobs:
             aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration \
               '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
-          # Create DynamoDB lock table if needed
           if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
@@ -94,25 +91,28 @@ jobs:
           fi
 
       - name: Generate ephemeral SSH key (for EC2 key pair)
+        shell: bash
         run: |
-          ssh-keygen -t ed25519 -N "" -f $RUNNER_TEMP/gha_key
-          echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> $GITHUB_ENV
+          ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/gha_key"
+          echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> "$GITHUB_ENV"
 
       - name: Resolve CIDR inputs
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
-            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> $GITHUB_ENV
+            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> "$GITHUB_ENV"
           else
-            echo 'SSH_CIDRS=[]' >> $GITHUB_ENV
+            echo 'SSH_CIDRS=[]' >> "$GITHUB_ENV"
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.grid_cidrs }}" ]; then
-            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> $GITHUB_ENV
+            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> "$GITHUB_ENV"
           else
-            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> $GITHUB_ENV
+            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> "$GITHUB_ENV"
           fi
 
       - name: Terraform init (remote backend S3 + DynamoDB)
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
           terraform init -reconfigure \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
@@ -123,6 +123,7 @@ jobs:
 
       - name: Terraform apply (create infra)
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
           terraform apply -auto-approve \
             -var="create_key_pair=true" \
@@ -133,12 +134,14 @@ jobs:
       - name: Capture Terraform outputs
         id: out
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
-          echo "grid_url=$(terraform output -raw grid_url)"   >> $GITHUB_OUTPUT
-          echo "public_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
-          echo "novnc_url=$(terraform output -raw novnc_url)" >> $GITHUB_OUTPUT
+          echo "grid_url=$(terraform output -raw grid_url)"   >> "$GITHUB_OUTPUT"
+          echo "public_ip=$(terraform output -raw public_ip)" >> "$GITHUB_OUTPUT"
+          echo "novnc_url=$(terraform output -raw novnc_url)" >> "$GITHUB_OUTPUT"
 
       - name: Echo URLs
+        shell: bash
         run: |
           echo "Grid:  ${{ steps.out.outputs.grid_url }}"
           echo "noVNC: ${{ steps.out.outputs.novnc_url }}"
@@ -154,7 +157,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Needed here because this job calls AWS CLI for waiters and debug
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -165,13 +167,14 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
 
       - name: Wait for EC2 instance-status-ok (best-effort)
         if: always()
         env:
           PUBLIC_IP: ${{ env.PUBLIC_IP }}
           AWS_REGION: ${{ env.AWS_REGION }}
+        shell: bash
         run: |
           set -e
           if [ -z "$PUBLIC_IP" ]; then
@@ -183,55 +186,58 @@ jobs:
             --filters "Name=ip-address,Values=$PUBLIC_IP" \
             --query 'Reservations[].Instances[].InstanceId' --output text || true)"
           if [ -n "$IID" ] && [ "$IID" != "None" ]; then
-            echo "Found instance: $IID. Waiting for instance-status-ok…"
+            echo "Found instance: $IID. Waiting for instance-status-ok..."
             aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$IID" || true
           else
             echo "Could not resolve instance by IP. Continuing without EC2 waiter."
           fi
 
-      - name: Debug: EC2 + SG details
+      - name: Debug - EC2 and Security Groups
         if: always()
         env:
           PUBLIC_IP: ${{ env.PUBLIC_IP }}
           AWS_REGION: ${{ env.AWS_REGION }}
+        shell: bash
         run: |
           set -e
           if [ -z "$PUBLIC_IP" ]; then exit 0; fi
-          echo "🔎 Looking up instance & SGs for $PUBLIC_IP"
+          echo "Debug instance and SGs for $PUBLIC_IP"
           IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=ip-address,Values=$PUBLIC_IP" \
             --query 'Reservations[].Instances[].InstanceId' --output text || true)"
           echo "InstanceId: $IID"
           aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$IID" \
-            --query 'Reservations[].Instances[].{Id:Instances[0].InstanceId, State:Instances[0].State.Name, AZ:Instances[0].Placement.AvailabilityZone, SGs:Instances[0].SecurityGroups[*].GroupId, Subnet:Instances[0].SubnetId, PrivateIp:Instances[0].PrivateIpAddress}' \
+            --query 'Reservations[].Instances[].{Id:InstanceId, State:State.Name, AZ:Placement.AvailabilityZone, SGs:SecurityGroups[*].GroupId, Subnet:SubnetId, PrivateIp:PrivateIpAddress}' \
             --output table || true
           SGIDS=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$IID" \
             --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text || true)
           for SG in $SGIDS; do
-            echo "---- Security Group $SG rules ----"
+            echo "Security Group $SG rules:"
             aws ec2 describe-security-groups --region "$AWS_REGION" --group-ids "$SG" \
               --query 'SecurityGroups[].{GroupId:GroupId, Ingress:IpPermissions, Egress:IpPermissionsEgress}' \
               --output json | jq . || true
           done
 
-      - name: Debug: show EC2 console/cloud-init output
+      - name: Debug - EC2 console output
         if: always()
         env:
           PUBLIC_IP: ${{ env.PUBLIC_IP }}
           AWS_REGION: ${{ env.AWS_REGION }}
+        shell: bash
         run: |
           set -e
           if [ -z "$PUBLIC_IP" ]; then exit 0; fi
           IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=ip-address,Values=$PUBLIC_IP" \
             --query 'Reservations[].Instances[].InstanceId' --output text || true)"
-          echo "🗒️  Latest EC2 console output for $IID:"
+          echo "Latest EC2 console output for $IID:"
           aws ec2 get-console-output --region "$AWS_REGION" --instance-id "$IID" --latest --output text 2>/dev/null || \
           aws ec2 get-console-output --region "$AWS_REGION" --instance-id "$IID" --output text || true
 
       - name: Wait for Grid readiness (TCP 4444 + /status)
         env:
           GRID_URL: ${{ env.GRID_URL }}
+        shell: bash
         run: |
           set -e
           URL="${GRID_URL%/}"
@@ -241,22 +247,23 @@ jobs:
             if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/4444" 2>/dev/null; then
               READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
               if [ "$READY" = "true" ]; then
-                echo "✅ Grid is ready."
+                echo "Grid is ready."
                 exit 0
               fi
-              echo "🟡 TCP is open but Grid not ready yet… ($i/120)"
+              echo "TCP is open but Grid not ready yet... ($i/120)"
             else
-              echo "⛔ Port 4444 not open yet… ($i/120)"
+              echo "Port 4444 not open yet... ($i/120)"
             fi
             sleep 5
           done
-          echo "❌ Grid did not become ready in time. Last /status (if any):"
+          echo "Grid did not become ready in time. Last /status (if any):"
           curl -v "$URL/status" || true
           exit 1
 
       - name: Build & run tests (Maven)
         env:
           GRID_URL: ${{ env.GRID_URL }}
+        shell: bash
         run: mvn -B -Dgrid.url="$GRID_URL" test
 
       - name: Archive TestNG reports (always)
@@ -293,25 +300,28 @@ jobs:
           terraform_version: 1.9.5
 
       - name: Regenerate ephemeral SSH key (matches var layout)
+        shell: bash
         run: |
-          ssh-keygen -t ed25519 -N "" -f $RUNNER_TEMP/gha_key
-          echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> $GITHUB_ENV
+          ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/gha_key"
+          echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> "$GITHUB_ENV"
 
       - name: Reuse CIDR inputs (same logic)
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
-            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> $GITHUB_ENV
+            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> "$GITHUB_ENV"
           else
-            echo 'SSH_CIDRS=[]' >> $GITHUB_ENV
+            echo 'SSH_CIDRS=[]' >> "$GITHUB_ENV"
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.grid_cidrs }}" ]; then
-            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> $GITHUB_ENV
+            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> "$GITHUB_ENV"
           else
-            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> $GITHUB_ENV
+            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> "$GITHUB_ENV"
           fi
 
       - name: Terraform init (remote backend)
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
           terraform init -reconfigure \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
@@ -322,6 +332,7 @@ jobs:
 
       - name: Terraform destroy (cleanup infra)
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
           terraform destroy -auto-approve \
             -var="create_key_pair=true" \
