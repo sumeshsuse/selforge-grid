@@ -130,7 +130,7 @@ jobs:
             -var="ssh_cidrs=${SSH_CIDRS}" \
             -var="grid_cidrs=${GRID_CIDRS}"
 
-      - name: Capture Terraform outputs
+      - name: Capture Terraform outputs (raw)
         id: out
         working-directory: ${{ env.IAC_DIR }}
         run: |
@@ -138,21 +138,14 @@ jobs:
           echo "public_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
           echo "novnc_url=$(terraform output -raw novnc_url)" >> $GITHUB_OUTPUT
 
-      - name: Normalize GRID_URL (ensure scheme, strip slash)
+      - name: Normalize Grid URL (http + no trailing slash)
         id: norm
         run: |
-          set -e
           RAW="${{ steps.out.outputs.grid_url }}"
-          if [ -z "$RAW" ]; then
-            echo "No grid_url from Terraform." >&2
-            exit 1
-          fi
-          if ! printf '%s' "$RAW" | grep -qiE '^https?://'; then
-            RAW="http://$RAW"
-          fi
+          if [[ "$RAW" != http*://* ]]; then RAW="http://$RAW"; fi
           RAW="${RAW%/}"
-          echo "GRID_URL=$RAW" >> "$GITHUB_ENV"
           echo "grid_url=$RAW" >> "$GITHUB_OUTPUT"
+          echo "GRID_URL=$RAW" >> "$GITHUB_ENV"
 
       - name: Echo URLs
         run: |
@@ -163,11 +156,18 @@ jobs:
     name: Run Selenium Tests
     runs-on: ubuntu-latest
     needs: terraform_apply
+    permissions:
+      id-token: write
+      contents: read
     env:
       GRID_URL: ${{ needs.terraform_apply.outputs.grid_url }}
+      AWS_REGION: ${{ env.AWS_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install jq (for parsing JSON)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -175,34 +175,63 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Show URL being used
-        run: echo "GRID_URL=${GRID_URL}"
+      - name: Configure AWS creds (OIDC) for readiness checks
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Wait for Selenium Grid to be ready (up to 5 minutes)
+      - name: Wait for EC2 instance status checks (best-effort)
+        env:
+          PUBLIC_IP: ${{ needs.terraform_apply.outputs.public_ip }}
+        run: |
+          set -e
+          if [ -z "$PUBLIC_IP" ]; then
+            echo "No public IP from Terraform outputs. Skipping EC2 wait."
+            exit 0
+          fi
+          echo "Looking up instance by public IP: $PUBLIC_IP"
+          IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters "Name=ip-address,Values=$PUBLIC_IP" \
+            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
+          if [ -n "$IID" ] && [ "$IID" != "None" ]; then
+            echo "Found instance: $IID. Waiting for instance-status-ok…"
+            # Do not fail the job if this waiter times out; it's just to reduce flakiness.
+            aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$IID" || true
+          else
+            echo "Could not resolve instance by IP. Continuing without EC2 waiter."
+          fi
+
+      - name: Wait for Selenium Grid to be ready (TCP + /status, up to ~10m)
         run: |
           set -e
           URL="${GRID_URL%/}"
-          for i in $(seq 1 60); do
-            READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
-            if [ "$READY" = "true" ]; then
-              echo "✅ Grid is ready."
-              exit 0
+          HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%:*}"
+          echo "Probing $HOST:4444"
+          for i in $(seq 1 120); do
+            if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/4444" 2>/dev/null; then
+              READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
+              if [ "$READY" = "true" ]; then
+                echo "✅ Grid is ready."
+                exit 0
+              fi
+              echo "🟡 TCP is open but Grid not ready yet… ($i/120)"
+            else
+              echo "⛔ Port 4444 not open yet… ($i/120)"
             fi
-            echo "⏳ Waiting for Grid to be ready… ($i/60)"
             sleep 5
           done
-          echo "❌ Grid did not become ready in time. Last /status:"
+          echo "❌ Grid did not become ready in time. Last /status (if any):"
           curl -v "$URL/status" || true
           exit 1
 
       - name: Build & run tests (Maven)
         run: |
-          URL="${GRID_URL%/}"
           mvn -B \
-            -Dgrid.url="$URL" \
-            -DgridUrl="$URL" \
-            -DGRID_URL="$URL" \
-            -Dwebdriver.remote.url="$URL/wd/hub" \
+            -Dgrid.url="$GRID_URL" \
+            -DgridUrl="$GRID_URL" \
+            -DGRID_URL="$GRID_URL" \
+            -Dwebdriver.remote.url="$GRID_URL/wd/hub" \
             test
 
       - name: Archive TestNG reports (always)
