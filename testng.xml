@@ -5,8 +5,6 @@
     </listeners>
     <test name="Chrome">
         <parameter name="browser" value="chrome"/>
-        <!-- Optionally pass this if you prefer via TestNG -->
-        <!-- <parameter name="gridUrl" value="http://<alb-dns>:4444"/> -->
         <classes>
             <class name="ui.DuckTest"/>
         </classes>
