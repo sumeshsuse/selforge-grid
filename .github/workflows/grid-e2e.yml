@@ -8,13 +8,10 @@ on:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: iac
 
+    # Set region explicitly so aws-actions has it (your error was "Input required and not supplied: aws-region")
     env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_REGION: us-east-1
 
     steps:
       - name: Checkout
@@ -32,29 +29,32 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
-      - name: Install tools (jq, curl)
+      - name: Install tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq curl
+          sudo apt-get install -y jq curl unzip
 
-      # If you use S3/Dynamo backend, ensure iac/backend.tf is present & configured.
+      # Terraform in iac/
       - name: Terraform Init
+        working-directory: iac
         run: terraform init -reconfigure
 
       - name: Terraform Apply (create Fargate Grid)
         id: tfapply
+        working-directory: iac
         run: terraform apply -auto-approve
 
       - name: Read outputs
         id: tfout
+        working-directory: iac
         run: |
           GRID_URL="$(terraform output -raw grid_url)"
           CHROME_VNC="$(terraform output -raw novnc_chrome_url)"
           FIREFOX_VNC="$(terraform output -raw novnc_firefox_url)"
-          echo "grid_url=$GRID_URL"           >> "$GITHUB_OUTPUT"
-          echo "novnc_chrome_url=$CHROME_VNC" >> "$GITHUB_OUTPUT"
+          echo "grid_url=$GRID_URL"             >> "$GITHUB_OUTPUT"
+          echo "novnc_chrome_url=$CHROME_VNC"   >> "$GITHUB_OUTPUT"
           echo "novnc_firefox_url=$FIREFOX_VNC" >> "$GITHUB_OUTPUT"
 
       - name: Wait for Grid hub to be ready
@@ -75,20 +75,20 @@ jobs:
           exit 1
 
       - name: Run Selenium tests
-        working-directory: .
         env:
           GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         run: |
           echo "Using GRID_URL=${GRID_URL}"
           mvn -B -Dgrid.url="${GRID_URL}" test
 
-      - name: Always print helpful URLs
+      - name: Helpful URLs
         if: always()
         run: |
-          echo "Hub:      ${{ steps.tfout.outputs.grid_url }}"
-          echo "noVNC-C:  ${{ steps.tfout.outputs.novnc_chrome_url }}"
-          echo "noVNC-F:  ${{ steps.tfout.outputs.novnc_firefox_url }}"
+          echo "Hub:        ${{ steps.tfout.outputs.grid_url }}"
+          echo "noVNC Chrome:  ${{ steps.tfout.outputs.novnc_chrome_url }}"
+          echo "noVNC Firefox: ${{ steps.tfout.outputs.novnc_firefox_url }}"
 
       - name: Terraform Destroy (always)
         if: always()
+        working-directory: iac
         run: terraform destroy -auto-approve
