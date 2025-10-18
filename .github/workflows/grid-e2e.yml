@@ -48,7 +48,6 @@ jobs:
           TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
         run: |
           set -euo pipefail
-
           # Create S3 bucket if missing
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
             if [ "${TF_STATE_REGION}" = "${AWS_REGION}" ]; then
@@ -59,7 +58,6 @@ jobs:
             fi
             aws s3api put-bucket-versioning --bucket "${TF_STATE_BUCKET}" --versioning-configuration Status=Enabled
           fi
-
           # Create DynamoDB lock table if missing
           if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
@@ -130,7 +128,6 @@ jobs:
             echo "Port 80 not open yet... ($i/120)"
             sleep 5
           done
-
           echo "Waiting for /status to be healthy..."
           for i in $(seq 1 120); do
             if curl -fsS "$URL/status" | jq -e '.value.ready == true' >/dev/null 2>&1; then
@@ -154,6 +151,59 @@ jobs:
         env:
           GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         run: mvn -B -Dgrid.url="$GRID_URL" test
+
+      # --- Allure HTML build & S3 publish (added) -----------------------------
+
+      - name: Build Allure HTML
+        run: mvn -B io.qameta.allure:allure-maven:report
+
+      - name: Publish Allure to S3 (versioned + latest)
+        env:
+          BUCKET: ${{ secrets.REPORTS_BUCKET }}
+          RUN_PREFIX: grid/allure/${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -e
+          SRC="target/site/allure-maven"
+          if [ ! -d "$SRC" ]; then
+            echo "❌ Allure report folder not found: $SRC"
+            exit 1
+          fi
+
+          # versioned path for traceability
+          aws s3 sync "$SRC" "s3://$BUCKET/$RUN_PREFIX" \
+            --delete \
+            --cache-control "no-cache" \
+            --metadata-directive REPLACE
+
+          # rolling "latest" pointer
+          aws s3 sync "$SRC" "s3://$BUCKET/grid/allure/latest" \
+            --delete \
+            --cache-control "no-cache" \
+            --metadata-directive REPLACE
+
+          VER_URL="s3://$BUCKET/$RUN_PREFIX/index.html"
+          LATEST_URL="s3://$BUCKET/grid/allure/latest/index.html"
+          echo "Versioned report: $VER_URL"
+          echo "Latest report:    $LATEST_URL"
+
+          {
+            echo "## Allure report"
+            echo ""
+            echo "- Versioned: \`$VER_URL\`"
+            echo "- Latest: \`$LATEST_URL\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # (Optional) Keep report as a GitHub artifact too
+      - name: Upload Allure HTML as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-html
+          path: target/site/allure-maven
+          if-no-files-found: warn
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
 
       - name: Always destroy infra
         if: always()
