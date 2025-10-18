@@ -1,4 +1,4 @@
-name: Grid E2E (Terraform → Tests → Destroy)
+name: Grid E2E (Fargate → Tests → Destroy)
 
 on:
   push:
@@ -21,18 +21,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC → assume role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
-          audience: sts.amazonaws.com
-          output-env-credentials: true
 
-      - name: Who am I?
+      - name: Who am I
         run: aws sts get-caller-identity
 
-      - name: Ensure remote state backend (S3 + DynamoDB)
+      - name: Ensure remote state infra (S3/Dynamo)
         shell: bash
         env:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
@@ -40,20 +38,14 @@ jobs:
           TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
         run: |
           set -euo pipefail
-          if [ -z "${TF_STATE_BUCKET}" ] || [ -z "${TF_STATE_REGION}" ] || [ -z "${TF_STATE_LOCK_TABLE}" ]; then
-            echo "ERROR: TF_STATE_BUCKET / TF_STATE_REGION / TF_STATE_LOCK_TABLE secrets must be set." >&2
-            exit 1
-          fi
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
-            if [ "${TF_STATE_REGION}" = "us-east-1" ]; then
+            if [ "${TF_STATE_REGION}" = "${AWS_REGION}" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
             else
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}" \
                 --create-bucket-configuration LocationConstraint="${TF_STATE_REGION}"
             fi
             aws s3api put-bucket-versioning --bucket "${TF_STATE_BUCKET}" --versioning-configuration Status=Enabled
-            aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration \
-              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
           if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
@@ -71,84 +63,71 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.IAC_DIR }}
         env:
-          TF_VAR_name_prefix: selenium-grid
-          TF_VAR_instance_type: t3.large
-          TF_VAR_volume_size_gb: 30
-          TF_VAR_grid_cidrs: '["0.0.0.0/0"]'
+          TF_VAR_name_prefix: selenium-fargate
         run: |
           terraform init -reconfigure \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="region=${{ secrets.TF_STATE_REGION }}" \
             -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" \
-            -backend-config="key=${TF_STATE_KEY}"
+            -backend-config="key=${{ env.TF_STATE_KEY }}"
 
-      - name: Terraform Apply (create Grid)
+      - name: Terraform Apply (Fargate Grid)
         id: tfapply
         working-directory: ${{ env.IAC_DIR }}
-        env:
-          TF_VAR_name_prefix: selenium-grid
-          TF_VAR_instance_type: t3.large
-          TF_VAR_volume_size_gb: 30
-          TF_VAR_grid_cidrs: '["0.0.0.0/0"]'
-        run: |
-          set -euo pipefail
-          terraform apply -auto-approve
-          terraform output -json > tf_outputs.json
-          GRID_URL=$(jq -r '.grid_url.value' tf_outputs.json)
-          echo "GRID_URL=${GRID_URL}" | tee -a $GITHUB_ENV
-          echo "Grid URL: ${GRID_URL}"
+        run: terraform apply -auto-approve
 
-      - name: Wait for port 4444
+      - name: Capture Outputs
+        id: tfout
+        working-directory: ${{ env.IAC_DIR }}
+        run: |
+          GRID_URL="$(terraform output -raw grid_url)"
+          NOVNC_URL="$(terraform output -raw novnc_url)"
+          echo "grid_url=${GRID_URL}"   >> $GITHUB_OUTPUT
+          echo "novnc_url=${NOVNC_URL}" >> $GITHUB_OUTPUT
+
+      - name: Wait for ALB:80
         env:
-          GRID_URL: ${{ env.GRID_URL }}
+          GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         shell: bash
         run: |
           set -e
           URL="${GRID_URL%/}"
-          HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%:*}"
-          echo "Probing $HOST:4444"
+          HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%/*}"; HOST="${HOST%%:*}"
+          echo "Probing $HOST:80"
           for i in $(seq 1 120); do
-            if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/4444" 2>/dev/null; then
-              echo "Port 4444 is open."
-              exit 0
+            if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/80" 2>/dev/null; then
+              echo "Port 80 is open."
+              break
             fi
-            echo "Port 4444 not open yet... ($i/120)"
+            echo "Port 80 not open yet... ($i/120)"
             sleep 5
           done
-          echo "Grid port 4444 did not open in time."
-          exit 1
 
-      - name: Verify /status is ready
-        env:
-          GRID_URL: ${{ env.GRID_URL }}
-        shell: bash
-        run: |
-          set -e
-          for i in $(seq 1 60); do
-            READY="$(curl -fsS "$GRID_URL/status" | jq -r '.value.ready // .ready // empty' || true)"
-            if [ "$READY" = "true" ]; then
-              echo "Grid is ready."
+          echo "Waiting for /status to be healthy..."
+          for i in $(seq 1 120); do
+            if curl -fsS "$URL/status" | jq -e '.value.ready == true' >/dev/null 2>&1; then
+              echo "Selenium is ready."
               exit 0
             fi
-            echo "Grid not ready yet... ($i/60)"
+            echo "Not ready yet... ($i/120)"
             sleep 5
           done
-          echo "Grid didn't report ready=true in time."
-          curl -v "$GRID_URL/status" || true
+          echo "Grid did not become ready in time."
+          curl -v "$URL/status" || true
           exit 1
 
-      - name: Setup JDK 21
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - name: Maven tests (-Dgrid.url)
+      - name: Maven Tests (point to Fargate Grid)
         env:
-          GRID_URL: ${{ env.GRID_URL }}
+          GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         run: mvn -B -Dgrid.url="$GRID_URL" test
 
-      - name: Terraform Destroy
+      - name: Always destroy infra
         if: always()
         working-directory: ${{ env.IAC_DIR }}
         run: terraform destroy -auto-approve
