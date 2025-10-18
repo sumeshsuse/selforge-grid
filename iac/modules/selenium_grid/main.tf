@@ -8,31 +8,85 @@ terraform {
 }
 
 ################
-# Inputs
+# Module inputs
 ################
-variable "name_prefix"    { type = string,      default = "selenium-grid" }
-variable "vpc_id"         { type = string,      default = null }
-variable "subnet_ids"     { type = list(string),default = [] } # leave empty to auto-pick default VPC subnets
-variable "grid_cidrs"     { type = list(string),default = ["0.0.0.0/0"] }
-variable "cpu"            { type = number,      default = 2048 }  # 2 vCPU
-variable "memory"         { type = number,      default = 4096 }  # 4 GB
-variable "create_route53" { type = bool,        default = false }
-variable "hosted_zone_id" { type = string,      default = null }
-variable "dns_name"       { type = string,      default = null }
-variable "aws_region"     { type = string,      default = null }  # only for logs (optional)
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
+}
 
-################
-# Data sources
-################
-data "aws_region" "current" {}
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
 
+variable "volume_size_gb" {
+  type    = number
+  default = 35
+}
+
+variable "key_name" {
+  type        = string
+  default     = null
+  description = "Existing EC2 key pair name (or null)"
+}
+
+variable "vpc_id" {
+  type    = string
+  default = null
+}
+
+variable "subnet_id" {
+  type    = string
+  default = null
+}
+
+variable "ssh_cidrs" {
+  type    = list(string)
+  default = []
+}
+
+variable "grid_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+variable "create_iam_role" {
+  type    = bool
+  default = false
+}
+
+variable "create_eip" {
+  type    = bool
+  default = false
+}
+
+variable "create_route53" {
+  type    = bool
+  default = false
+}
+
+variable "hosted_zone_id" {
+  type    = string
+  default = null
+}
+
+variable "dns_name" {
+  type    = string
+  default = null
+}
+
+#############
+# Networking
+#############
 data "aws_vpc" "default" {
   count   = var.vpc_id == null ? 1 : 0
   default = true
 }
 
-data "aws_subnets" "public" {
-  count = length(var.subnet_ids) == 0 ? 1 : 0
+data "aws_subnets" "default" {
+  count = var.subnet_id == null ? 1 : 0
+
   filter {
     name   = "vpc-id"
     values = [var.vpc_id != null ? var.vpc_id : data.aws_vpc.default[0].id]
@@ -40,384 +94,339 @@ data "aws_subnets" "public" {
 }
 
 locals {
-  vpc_id     = var.vpc_id != null ? var.vpc_id : data.aws_vpc.default[0].id
-  subnets    = length(var.subnet_ids) > 0 ? var.subnet_ids : data.aws_subnets.public[0].ids
-  aws_region = coalesce(var.aws_region, data.aws_region.current.name)
+  effective_vpc_id    = var.vpc_id    != null ? var.vpc_id    : data.aws_vpc.default[0].id
+  effective_subnet_id = var.subnet_id != null ? var.subnet_id : data.aws_subnets.default[0].ids[0]
+
+  ssh_allow  = var.ssh_cidrs
+  grid_allow = var.grid_cidrs
 }
 
-########################
-# Security group
-########################
-resource "aws_security_group" "grid" {
-  name        = "${var.name_prefix}-sg"
-  description = "Allow Grid and noVNC"
-  vpc_id      = local.vpc_id
+###########################
+# AMI (Amazon Linux 2023)
+###########################
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
 
-  # Hub 4444
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-kernel-6.1-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+}
+
+#####################
+# Security Group
+#####################
+resource "aws_security_group" "grid_sg" {
+  name        = "${var.name_prefix}-sg"
+  description = "Allow Selenium Grid and optional SSH"
+  vpc_id      = local.effective_vpc_id
+
+  # SSH 22
   dynamic "ingress" {
-    for_each = var.grid_cidrs
+    for_each = local.ssh_allow
     content {
-      description = "Grid 4444"
+      description = "SSH"
+      from_port   = 22
+      to_port     = 22
       protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  # Grid 4444
+  dynamic "ingress" {
+    for_each = local.grid_allow
+    content {
+      description = "Grid"
       from_port   = 4444
       to_port     = 4444
+      protocol    = "tcp"
       cidr_blocks = [ingress.value]
     }
   }
 
-  # Chrome noVNC 7900
+  # noVNC 7900 (Chrome node)
   dynamic "ingress" {
-    for_each = var.grid_cidrs
+    for_each = local.grid_allow
     content {
-      description = "noVNC chrome 7900"
-      protocol    = "tcp"
+      description = "noVNC"
       from_port   = 7900
       to_port     = 7900
-      cidr_blocks = [ingress.value]
-    }
-  }
-
-  # Firefox noVNC 7901
-  dynamic "ingress" {
-    for_each = var.grid_cidrs
-    content {
-      description = "noVNC firefox 7901"
       protocol    = "tcp"
-      from_port   = 7901
-      to_port     = 7901
       cidr_blocks = [ingress.value]
     }
   }
 
   egress {
     description      = "All outbound"
-    protocol         = "-1"
     from_port        = 0
     to_port          = 0
+    protocol         = "-1"
     cidr_blocks      = ["0.0.0.0/0"]
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = { Name = "${var.name_prefix}-sg" }
+  tags = {
+    Name = "${var.name_prefix}-sg"
+  }
 }
 
-########################
-# ECS Cluster
-########################
-resource "aws_ecs_cluster" "this" {
-  name = "${var.name_prefix}-cluster"
-}
-
-########################
-# IAM (execution role)
-########################
-data "aws_iam_policy_document" "task_exec_assume" {
+############
+# Optional IAM for the instance (only if you need ECR/S3 pulls)
+############
+data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
+      identifiers = ["ec2.amazonaws.com"]
     }
   }
 }
 
-resource "aws_iam_role" "task_execution" {
-  name               = "${var.name_prefix}-exec-role"
-  assume_role_policy = data.aws_iam_policy_document.task_exec_assume.json
+resource "aws_iam_role" "grid" {
+  count              = var.create_iam_role ? 1 : 0
+  name               = "${var.name_prefix}-role"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
 }
 
-resource "aws_iam_role_policy_attachment" "exec_policy" {
-  role       = aws_iam_role.task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+resource "aws_iam_role_policy_attachment" "ecr_full" {
+  count      = var.create_iam_role ? 1 : 0
+  role       = aws_iam_role.grid[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
 }
 
-########################
-# Logs
-########################
-resource "aws_cloudwatch_log_group" "this" {
-  name              = "/ecs/${var.name_prefix}"
-  retention_in_days = 7
+resource "aws_iam_role_policy_attachment" "s3_full" {
+  count      = var.create_iam_role ? 1 : 0
+  role       = aws_iam_role.grid[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
-########################
-# ALB + Target Groups + Listeners
-########################
-resource "aws_lb" "this" {
-  name               = "${var.name_prefix}-alb"
-  load_balancer_type = "application"
-  subnets            = local.subnets
-  security_groups    = [aws_security_group.grid.id]
+resource "aws_iam_instance_profile" "grid" {
+  count = var.create_iam_role ? 1 : 0
+  name  = "${var.name_prefix}-instance-profile"
+  role  = aws_iam_role.grid[0].name
 }
 
-# Hub 4444
-resource "aws_lb_target_group" "hub" {
-  name        = "${var.name_prefix}-tg-hub"
-  port        = 4444
-  protocol    = "HTTP"
-  vpc_id      = local.vpc_id
-  target_type = "ip"
+#############
+# EC2 host
+#############
+resource "aws_instance" "grid" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  key_name                    = var.key_name
+  subnet_id                   = local.effective_subnet_id
+  vpc_security_group_ids      = [aws_security_group.grid_sg.id]
+  associate_public_ip_address = true
 
-  health_check {
-    path                = "/status"
-    port                = "4444"
-    protocol            = "HTTP"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 15
-    timeout             = 5
-    matcher             = "200"
+  iam_instance_profile = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
+
+  root_block_device {
+    volume_size = var.volume_size_gb
+    volume_type = "gp3"
+  }
+
+  user_data_replace_on_change = true
+
+  #cloud-config / bash user-data
+  user_data = <<-EOF
+    #!/bin/bash
+    set -euxo pipefail
+    exec > >(tee -a /var/log/user-data.log) 2>&1
+    echo "[user-data] start $(date -Iseconds)"
+
+    dnf -y makecache
+    dnf -y install docker curl wget jq
+
+    systemctl enable --now docker
+    sleep 3
+
+    # docker compose v2
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+    docker compose version || true
+
+    # folders
+    mkdir -p /opt/grid/logs/hub /opt/grid/logs/chrome /opt/grid/logs/firefox
+    mkdir -p /opt/grid/downloads/chrome /opt/grid/downloads/firefox
+    cd /opt/grid
+
+    cat > /opt/grid/docker-compose.yml <<'YAML'
+    version: "3.9"
+    services:
+      selenium-hub:
+        image: selenium/hub:4.25.0
+        platform: linux/amd64
+        container_name: selenium-hub
+        ports:
+          - "4444:4444"
+        environment:
+          - SE_OPTS=--relax-checks true
+          - OTEL_TRACES_EXPORTER=none
+          - OTEL_METRICS_EXPORTER=none
+          - OTEL_LOGS_EXPORTER=none
+        volumes:
+          - "./logs/hub:/opt/selenium/logs"
+        healthcheck:
+          test: ["CMD", "bash", "-lc", "wget -q --spider http://localhost:4444/status"]
+          interval: 5s
+          timeout: 3s
+          retries: 60
+          start_period: 10s
+        restart: unless-stopped
+        logging:
+          driver: local
+          options: { max-size: "10m", max-file: "3" }
+
+      chrome:
+        image: selenium/node-chrome:4.25.0
+        platform: linux/amd64
+        shm_size: 2gb
+        depends_on:
+          selenium-hub:
+            condition: service_healthy
+        environment:
+          - SE_EVENT_BUS_HOST=selenium-hub
+          - SE_EVENT_BUS_PUBLISH_PORT=4442
+          - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+          - SE_NODE_MAX_SESSIONS=1
+          - SE_SCREEN_WIDTH=1920
+          - SE_SCREEN_HEIGHT=1080
+          - OTEL_TRACES_EXPORTER=none
+          - OTEL_METRICS_EXPORTER=none
+          - OTEL_LOGS_EXPORTER=none
+        ports:
+          - "7900:7900"  # expose chrome noVNC only
+        volumes:
+          - "./logs/chrome:/opt/selenium/logs"
+          - "./downloads/chrome:/home/seluser/Downloads"
+        ulimits:
+          nofile:
+            soft: 32768
+            hard: 32768
+        restart: unless-stopped
+        logging:
+          driver: local
+          options: { max-size: "10m", max-file: "3" }
+
+      firefox:
+        image: selenium/node-firefox:4.25.0
+        platform: linux/amd64
+        shm_size: 2gb
+        depends_on:
+          selenium-hub:
+            condition: service_healthy
+        environment:
+          - SE_EVENT_BUS_HOST=selenium-hub
+          - SE_EVENT_BUS_PUBLISH_PORT=4442
+          - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+          - SE_NODE_MAX_SESSIONS=1
+          - SE_SCREEN_WIDTH=1920
+          - SE_SCREEN_HEIGHT=1080
+          - OTEL_TRACES_EXPORTER=none
+          - OTEL_METRICS_EXPORTER=none
+          - OTEL_LOGS_EXPORTER=none
+        volumes:
+          - "./logs/firefox:/opt/selenium/logs"
+          - "./downloads/firefox:/home/seluser/Downloads"
+        ulimits:
+          nofile:
+            soft: 32768
+            hard: 32768
+        restart: unless-stopped
+        logging:
+          driver: local
+          options: { max-size: "10m", max-file: "3" }
+    YAML
+
+    echo "[user-data] docker pull + up"
+    docker compose -f /opt/grid/docker-compose.yml pull
+    docker compose -f /opt/grid/docker-compose.yml up -d
+
+    echo "[user-data] docker ps after up:"
+    docker ps -a
+
+    # Wait for hub
+    echo "[user-data] waiting for hub readiness..."
+    for i in $(seq 1 120); do
+      if curl -fsS http://localhost:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
+        echo "[user-data] hub is ready"
+        exit 0
+      fi
+      sleep 5
+    done
+
+    echo "[user-data] hub NOT ready; last /status:"
+    curl -v http://localhost:4444/status || true
+    echo "[user-data] docker ps (final):"
+    docker ps -a
+    exit 1
+  EOF
+
+  tags = {
+    Name = "${var.name_prefix}-ec2"
   }
 }
 
-resource "aws_lb_listener" "hub" {
-  load_balancer_arn = aws_lb.this.arn
-  port              = 4444
-  protocol          = "HTTP"
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.hub.arn
+#############
+# Optional EIP / DNS
+#############
+resource "aws_eip" "grid" {
+  count  = var.create_eip ? 1 : 0
+  domain = "vpc"
+  tags = {
+    Name = "${var.name_prefix}-eip"
   }
 }
 
-# Chrome noVNC 7900
-resource "aws_lb_target_group" "novnc_chrome" {
-  name        = "${var.name_prefix}-tg-chrome"
-  port        = 7900
-  protocol    = "HTTP"
-  vpc_id      = local.vpc_id
-  target_type = "ip"
-
-  health_check {
-    path                = "/"
-    port                = "7900"
-    protocol            = "HTTP"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 30
-    timeout             = 5
-    matcher             = "200-399"
-  }
+resource "aws_eip_association" "grid" {
+  count         = var.create_eip ? 1 : 0
+  instance_id   = aws_instance.grid.id
+  allocation_id = aws_eip.grid[0].id
 }
 
-resource "aws_lb_listener" "novnc_chrome" {
-  load_balancer_arn = aws_lb.this.arn
-  port              = 7900
-  protocol          = "HTTP"
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.novnc_chrome.arn
-  }
-}
-
-# Firefox noVNC exposed on 7901
-resource "aws_lb_target_group" "novnc_firefox" {
-  name        = "${var.name_prefix}-tg-firefox"
-  port        = 7901
-  protocol    = "HTTP"
-  vpc_id      = local.vpc_id
-  target_type = "ip"
-
-  health_check {
-    path                = "/"
-    port                = "7901"
-    protocol            = "HTTP"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    interval            = 30
-    timeout             = 5
-    matcher             = "200-399"
-  }
-}
-
-resource "aws_lb_listener" "novnc_firefox" {
-  load_balancer_arn = aws_lb.this.arn
-  port              = 7901
-  protocol          = "HTTP"
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.novnc_firefox.arn
-  }
-}
-
-########################
-# Task Definition (one task, three containers)
-########################
-locals {
-  container_defs = jsonencode([
-    {
-      name      = "selenium-hub"
-      image     = "selenium/hub:4.25.0"
-      essential = true
-      portMappings = [
-        { containerPort = 4444, hostPort = 4444, protocol = "tcp" }
-      ]
-      environment = [
-        { name = "SE_OPTS",               value = "--relax-checks true" },
-        { name = "OTEL_TRACES_EXPORTER",  value = "none" },
-        { name = "OTEL_METRICS_EXPORTER", value = "none" },
-        { name = "OTEL_LOGS_EXPORTER",    value = "none" }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.this.name
-          awslogs-region        = local.aws_region
-          awslogs-stream-prefix = "hub"
-        }
-      }
-      healthCheck = {
-        command  = ["CMD-SHELL", "wget -q --spider http://localhost:4444/status || exit 1"]
-        interval = 10
-        retries  = 6
-        timeout  = 5
-      }
-    },
-    {
-      name      = "chrome"
-      image     = "selenium/node-chrome:4.25.0"
-      essential = true
-      portMappings = [
-        { containerPort = 7900, hostPort = 7900, protocol = "tcp" }
-      ]
-      environment = [
-        { name = "SE_EVENT_BUS_HOST",         value = "127.0.0.1" },
-        { name = "SE_EVENT_BUS_PUBLISH_PORT", value = "4442" },
-        { name = "SE_EVENT_BUS_SUBSCRIBE_PORT", value = "4443" },
-        { name = "SE_NODE_MAX_SESSIONS",      value = "1" },
-        { name = "SE_SCREEN_WIDTH",           value = "1920" },
-        { name = "SE_SCREEN_HEIGHT",          value = "1080" },
-        { name = "OTEL_TRACES_EXPORTER",      value = "none" },
-        { name = "OTEL_METRICS_EXPORTER",     value = "none" },
-        { name = "OTEL_LOGS_EXPORTER",        value = "none" }
-      ]
-      dependsOn = [{ containerName = "selenium-hub", condition = "HEALTHY" }]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.this.name
-          awslogs-region        = local.aws_region
-          awslogs-stream-prefix = "chrome"
-        }
-      }
-    },
-    {
-      name      = "firefox"
-      image     = "selenium/node-firefox:4.25.0"
-      essential = true
-      portMappings = [
-        { containerPort = 7900, hostPort = 7901, protocol = "tcp" }
-      ]
-      environment = [
-        { name = "SE_EVENT_BUS_HOST",         value = "127.0.0.1" },
-        { name = "SE_EVENT_BUS_PUBLISH_PORT", value = "4442" },
-        { name = "SE_EVENT_BUS_SUBSCRIBE_PORT", value = "4443" },
-        { name = "SE_NODE_MAX_SESSIONS",      value = "1" },
-        { name = "SE_SCREEN_WIDTH",           value = "1920" },
-        { name = "SE_SCREEN_HEIGHT",          value = "1080" },
-        { name = "OTEL_TRACES_EXPORTER",      value = "none" },
-        { name = "OTEL_METRICS_EXPORTER",     value = "none" },
-        { name = "OTEL_LOGS_EXPORTER",        value = "none" }
-      ]
-      dependsOn = [{ containerName = "selenium-hub", condition = "HEALTHY" }]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.this.name
-          awslogs-region        = local.aws_region
-          awslogs-stream-prefix = "firefox"
-        }
-      }
-    }
-  ])
-}
-
-resource "aws_ecs_task_definition" "grid" {
-  family                   = "${var.name_prefix}-task"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = tostring(var.cpu)
-  memory                   = tostring(var.memory)
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  container_definitions    = local.container_defs
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = "X86_64"
-  }
-}
-
-########################
-# ECS Service
-########################
-resource "aws_ecs_service" "grid" {
-  name            = "${var.name_prefix}-svc"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.grid.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = local.subnets
-    security_groups  = [aws_security_group.grid.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.hub.arn
-    container_name   = "selenium-hub"
-    container_port   = 4444
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.novnc_chrome.arn
-    container_name   = "chrome"
-    container_port   = 7900
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.novnc_firefox.arn
-    container_name   = "firefox"
-    container_port   = 7900
-  }
-
-  depends_on = [
-    aws_lb_listener.hub,
-    aws_lb_listener.novnc_chrome,
-    aws_lb_listener.novnc_firefox
-  ]
-
-  lifecycle {
-    ignore_changes = [desired_count]
-  }
-}
-
-########################
-# Optional DNS
-########################
 resource "aws_route53_record" "grid" {
   count   = var.create_route53 ? 1 : 0
   zone_id = var.hosted_zone_id
   name    = var.dns_name
-  type    = "CNAME"
+  type    = "A"
   ttl     = 60
-  records = [aws_lb.this.dns_name]
+  records = [
+    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
+  ]
 }
 
-########################
+#########
 # Outputs
-########################
-output "alb_dns_name" {
-  value = aws_lb.this.dns_name
+#########
+output "public_ip" {
+  value = aws_instance.grid.public_ip
+}
+
+output "public_dns" {
+  value = aws_instance.grid.public_dns
+}
+
+output "instance_id" {
+  value = aws_instance.grid.id
+}
+
+output "security_group_id" {
+  value = aws_security_group.grid_sg.id
 }
 
 output "grid_url" {
-  value = "http://${aws_route53_record.grid.count > 0 ? var.dns_name : aws_lb.this.dns_name}:4444"
+  value = "http://${aws_instance.grid.public_ip}:4444"
 }
 
-output "novnc_url_chrome" {
-  value = "http://${aws_route53_record.grid.count > 0 ? var.dns_name : aws_lb.this.dns_name}:7900"
-}
-
-output "novnc_url_firefox" {
-  value = "http://${aws_route53_record.grid.count > 0 ? var.dns_name : aws_lb.this.dns_name}:7901"
+output "novnc_url" {
+  value = "http://${aws_instance.grid.public_ip}:7900"
 }
