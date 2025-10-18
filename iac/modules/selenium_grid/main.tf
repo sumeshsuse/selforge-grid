@@ -7,17 +7,40 @@ terraform {
   }
 }
 
-variable "name_prefix"     { type = string  default = "selenium-grid" }
-variable "instance_type"   { type = string  default = "t3.large" }
-variable "volume_size_gb"  { type = number  default = 30 }
-variable "grid_cidrs"      { type = list(string) default = ["0.0.0.0/0"] }
-
-# Default VPC + first public subnet
-data "aws_vpc" "default" { default = true }
-data "aws_subnets" "default" {
-  filter { name = "vpc-id" values = [data.aws_vpc.default.id] }
+# -------- Variables (multi-line, no commas) --------
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
 }
 
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
+
+variable "volume_size_gb" {
+  type    = number
+  default = 30
+}
+
+variable "grid_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+# -------- Network (default VPC) --------
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+# -------- Security Group --------
 resource "aws_security_group" "grid" {
   name        = "${var.name_prefix}-sg"
   description = "Allow Selenium Grid (4444) and noVNC (7900)"
@@ -46,24 +69,34 @@ resource "aws_security_group" "grid" {
   }
 
   egress {
+    description      = "All outbound"
     from_port        = 0
     to_port          = 0
     protocol         = "-1"
     cidr_blocks      = ["0.0.0.0/0"]
     ipv6_cidr_blocks = ["::/0"]
-    description      = "All outbound"
   }
 
   tags = { Name = "${var.name_prefix}-sg" }
 }
 
+# -------- AMI --------
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
-  filter { name = "name"         values = ["al2023-ami-*-kernel-6.1-x86_64"] }
-  filter { name = "architecture" values = ["x86_64"] }
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-kernel-6.1-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 
+# -------- EC2 with single Selenium container --------
 resource "aws_instance" "grid" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
@@ -88,7 +121,6 @@ resource "aws_instance" "grid" {
     systemctl enable --now docker
     sleep 2
 
-    # Pull + run single-container Selenium (standalone chrome)
     docker pull selenium/standalone-chrome:4.25.0
     docker rm -f selenium-grid || true
     docker run -d --name selenium-grid \
@@ -117,6 +149,7 @@ resource "aws_instance" "grid" {
   tags = { Name = "${var.name_prefix}-ec2" }
 }
 
+# -------- Outputs --------
 output "grid_url" {
   value = "http://${aws_instance.grid.public_ip}:4444"
 }
