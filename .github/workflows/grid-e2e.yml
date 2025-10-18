@@ -69,6 +69,8 @@ jobs:
             echo "ERROR: TF_STATE_BUCKET / TF_STATE_REGION / TF_STATE_LOCK_TABLE must be set as repo secrets." >&2
             exit 1
           fi
+
+          # S3 bucket (idempotent)
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
             if [ "${TF_STATE_REGION}" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
@@ -80,7 +82,12 @@ jobs:
             aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration \
               '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
-          if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2&> /dev/null; then
+
+          # DynamoDB table (idempotent, fixed redirection)
+          if ! aws dynamodb describe-table \
+               --table-name "${TF_STATE_LOCK_TABLE}" \
+               --region "${TF_STATE_REGION}" \
+               >/dev/null 2>&1; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -172,71 +179,6 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Wait for EC2 instance-status-ok (best-effort)
-        if: always()
-        env:
-          PUBLIC_IP: ${{ env.PUBLIC_IP }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-        shell: bash
-        run: |
-          set -e
-          if [ -z "$PUBLIC_IP" ]; then
-            echo "No public IP from Terraform outputs. Skipping EC2 wait."
-            exit 0
-          fi
-          echo "Looking up instance by public IP: $PUBLIC_IP"
-          IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters "Name=ip-address,Values=$PUBLIC_IP" \
-            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
-          if [ -n "$IID" ] && [ "$IID" != "None" ]; then
-            echo "Found instance: $IID. Waiting for instance-status-ok..."
-            aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$IID" || true
-          else
-            echo "Could not resolve instance by IP. Continuing without EC2 waiter."
-          fi
-
-      - name: Debug - EC2 and Security Groups
-        if: always()
-        env:
-          PUBLIC_IP: ${{ env.PUBLIC_IP }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-        shell: bash
-        run: |
-          set -e
-          if [ -z "$PUBLIC_IP" ]; then exit 0; fi
-          echo "Debug instance and SGs for $PUBLIC_IP"
-          IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters "Name=ip-address,Values=$PUBLIC_IP" \
-            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
-          echo "InstanceId: $IID"
-          aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$IID" \
-            --query 'Reservations[].Instances[].{Id:InstanceId, State:State.Name, AZ:Placement.AvailabilityZone, SGs:SecurityGroups[*].GroupId, Subnet:SubnetId, PrivateIp:PrivateIpAddress}' \
-            --output table || true
-          SGIDS=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$IID" \
-            --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text || true)
-          for SG in $SGIDS; do
-            echo "Security Group $SG rules:"
-            aws ec2 describe-security-groups --region "$AWS_REGION" --group-ids "$SG" \
-              --query 'SecurityGroups[].{GroupId:GroupId, Ingress:IpPermissions, Egress:IpPermissionsEgress}' \
-              --output json | jq . || true
-          done
-
-      - name: Debug - EC2 console output
-        if: always()
-        env:
-          PUBLIC_IP: ${{ env.PUBLIC_IP }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-        shell: bash
-        run: |
-          set -e
-          if [ -z "$PUBLIC_IP" ]; then exit 0; fi
-          IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters "Name=ip-address,Values=$PUBLIC_IP" \
-            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
-          echo "Latest EC2 console output for $IID:"
-          aws ec2 get-console-output --region "$AWS_REGION" --instance-id "$IID" --latest --output text 2>/dev/null || \
-          aws ec2 get-console-output --region "$AWS_REGION" --instance-id "$IID" --output text || true
-
       - name: Wait for Grid readiness (TCP 4444 + /status)
         env:
           GRID_URL: ${{ env.GRID_URL }}
@@ -269,7 +211,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           URL="${GRID_URL%/}"
           HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%:*}"
 
@@ -305,7 +246,7 @@ jobs:
       - name: Build & run tests (Maven)
         env:
           GRID_URL: ${{ env.GRID_URL }}
-          gridUrl:  ${{ env.GRID_URL }}   # also expose for testng.xml ${gridUrl}
+          gridUrl:  ${{ env.GRID_URL }}
         shell: bash
         run: |
           mvn -B -Dgrid.url="$GRID_URL" -DgridUrl="$GRID_URL" test
@@ -343,13 +284,13 @@ jobs:
         with:
           terraform_version: 1.9.5
 
-      - name: Regenerate ephemeral SSH key (matches var layout)
+      - name: Regenerate ephemeral SSH key
         shell: bash
         run: |
           ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/gha_key"
           echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> "$GITHUB_ENV"
 
-      - name: Reuse CIDR inputs (same logic)
+      - name: Reuse CIDR inputs
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
