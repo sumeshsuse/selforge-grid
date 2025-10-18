@@ -10,19 +10,71 @@ terraform {
 ################
 # Module inputs
 ################
-variable "name_prefix"      { type = string  default = "selenium-grid" }
-variable "instance_type"    { type = string  default = "t3.large" }
-variable "volume_size_gb"   { type = number  default = 35 }
-variable "key_name"         { type = string  default = null  description = "Existing EC2 key pair name (or null)" }
-variable "vpc_id"           { type = string  default = null }
-variable "subnet_id"        { type = string  default = null }
-variable "ssh_cidrs"        { type = list(string) default = [] }
-variable "grid_cidrs"       { type = list(string) default = ["0.0.0.0/0"] }
-variable "create_iam_role"  { type = bool   default = false }
-variable "create_eip"       { type = bool   default = false }
-variable "create_route53"   { type = bool   default = false }
-variable "hosted_zone_id"   { type = string  default = null }
-variable "dns_name"         { type = string  default = null }
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
+}
+
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
+
+variable "volume_size_gb" {
+  type    = number
+  default = 35
+}
+
+variable "key_name" {
+  type        = string
+  default     = null
+  description = "Existing EC2 key pair name (or null)"
+}
+
+variable "vpc_id" {
+  type    = string
+  default = null
+}
+
+variable "subnet_id" {
+  type    = string
+  default = null
+}
+
+variable "ssh_cidrs" {
+  type    = list(string)
+  default = []
+}
+
+variable "grid_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+variable "create_iam_role" {
+  type    = bool
+  default = false
+}
+
+variable "create_eip" {
+  type    = bool
+  default = false
+}
+
+variable "create_route53" {
+  type    = bool
+  default = false
+}
+
+variable "hosted_zone_id" {
+  type    = string
+  default = null
+}
+
+variable "dns_name" {
+  type    = string
+  default = null
+}
 
 #############
 # Networking
@@ -51,7 +103,7 @@ locals {
 ###########################
 # AMI (Amazon Linux 2023)
 ###########################
-# Use SSM public parameter to avoid ECS-optimized AMIs
+# Use SSM public parameter for the latest AL2023 x86_64 AMI
 data "aws_ssm_parameter" "al2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
 }
@@ -64,7 +116,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Allow Selenium Grid and optional SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH 22
+  # SSH 22 (optional)
   dynamic "ingress" {
     for_each = local.ssh_allow
     content {
@@ -109,7 +161,9 @@ resource "aws_security_group" "grid_sg" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = { Name = "${var.name_prefix}-sg" }
+  tags = {
+    Name = "${var.name_prefix}-sg"
+  }
 }
 
 ############
@@ -265,7 +319,9 @@ resource "aws_instance" "grid" {
     exit 1
   EOF
 
-  tags = { Name = "${var.name_prefix}-ec2" }
+  tags = {
+    Name = "${var.name_prefix}-ec2"
+  }
 }
 
 #############
@@ -274,7 +330,9 @@ resource "aws_instance" "grid" {
 resource "aws_eip" "grid" {
   count  = var.create_eip ? 1 : 0
   domain = "vpc"
-  tags   = { Name = "${var.name_prefix}-eip" }
+  tags = {
+    Name = "${var.name_prefix}-eip"
+  }
 }
 
 resource "aws_eip_association" "grid" {
@@ -289,15 +347,34 @@ resource "aws_route53_record" "grid" {
   name    = var.dns_name
   type    = "A"
   ttl     = 60
-  records = [ var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip ]
+  records = [
+    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
+  ]
 }
 
 #########
 # Outputs
 #########
-output "public_ip"         { value = aws_instance.grid.public_ip }
-output "public_dns"        { value = aws_instance.grid.public_dns }
-output "instance_id"       { value = aws_instance.grid.id }
-output "security_group_id" { value = aws_security_group.grid_sg.id }
-output "grid_url"          { value = "http://${aws_instance.grid.public_ip}:4444" }
-output "novnc_url"         { value = "http://${aws_instance.grid.public_ip}:7900" }
+output "public_ip" {
+  value = aws_instance.grid.public_ip
+}
+
+output "public_dns" {
+  value = aws_instance.grid.public_dns
+}
+
+output "instance_id" {
+  value = aws_instance.grid.id
+}
+
+output "security_group_id" {
+  value = aws_security_group.grid_sg.id
+}
+
+output "grid_url" {
+  value = "http://${aws_instance.grid.public_ip}:4444"
+}
+
+output "novnc_url" {
+  value = "http://${aws_instance.grid.public_ip}:7900"
+}
