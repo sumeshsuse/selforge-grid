@@ -10,71 +10,19 @@ terraform {
 ################
 # Module inputs
 ################
-variable "name_prefix" {
-  type    = string
-  default = "selenium-grid"
-}
-
-variable "instance_type" {
-  type    = string
-  default = "t3.large"
-}
-
-variable "volume_size_gb" {
-  type    = number
-  default = 35
-}
-
-variable "key_name" {
-  type        = string
-  default     = null
-  description = "Existing EC2 key pair name (or null)"
-}
-
-variable "vpc_id" {
-  type    = string
-  default = null
-}
-
-variable "subnet_id" {
-  type    = string
-  default = null
-}
-
-variable "ssh_cidrs" {
-  type    = list(string)
-  default = []
-}
-
-variable "grid_cidrs" {
-  type    = list(string)
-  default = ["0.0.0.0/0"]
-}
-
-variable "create_iam_role" {
-  type    = bool
-  default = false
-}
-
-variable "create_eip" {
-  type    = bool
-  default = false
-}
-
-variable "create_route53" {
-  type    = bool
-  default = false
-}
-
-variable "hosted_zone_id" {
-  type    = string
-  default = null
-}
-
-variable "dns_name" {
-  type    = string
-  default = null
-}
+variable "name_prefix"      { type = string  default = "selenium-grid" }
+variable "instance_type"    { type = string  default = "t3.large" }
+variable "volume_size_gb"   { type = number  default = 35 }
+variable "key_name"         { type = string  default = null  description = "Existing EC2 key pair name (or null)" }
+variable "vpc_id"           { type = string  default = null }
+variable "subnet_id"        { type = string  default = null }
+variable "ssh_cidrs"        { type = list(string) default = [] }
+variable "grid_cidrs"       { type = list(string) default = ["0.0.0.0/0"] }
+variable "create_iam_role"  { type = bool   default = false }
+variable "create_eip"       { type = bool   default = false }
+variable "create_route53"   { type = bool   default = false }
+variable "hosted_zone_id"   { type = string  default = null }
+variable "dns_name"         { type = string  default = null }
 
 #############
 # Networking
@@ -103,19 +51,9 @@ locals {
 ###########################
 # AMI (Amazon Linux 2023)
 ###########################
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-*-kernel-6.1-x86_64"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
+# Use SSM public parameter to avoid ECS-optimized AMIs
+data "aws_ssm_parameter" "al2023" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
 }
 
 #####################
@@ -150,7 +88,7 @@ resource "aws_security_group" "grid_sg" {
     }
   }
 
-  # noVNC 7900 (Chrome VNC)
+  # noVNC 7900 (Chrome)
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
@@ -180,7 +118,6 @@ resource "aws_security_group" "grid_sg" {
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-
     principals {
       type        = "Service"
       identifiers = ["ec2.amazonaws.com"]
@@ -216,7 +153,7 @@ resource "aws_iam_instance_profile" "grid" {
 # EC2 host
 #############
 resource "aws_instance" "grid" {
-  ami                         = data.aws_ami.al2023.id
+  ami                         = data.aws_ssm_parameter.al2023.value
   instance_type               = var.instance_type
   key_name                    = var.key_name
   subnet_id                   = local.effective_subnet_id
@@ -237,34 +174,30 @@ resource "aws_instance" "grid" {
     exec > >(tee -a /var/log/user-data.log) 2>&1
     echo "[user-data] start $(date -Iseconds)"
 
-    # On ECS AMIs, stop/disable the ECS agent so it doesn't conflict with Docker
+    # If ECS agent exists on the AMI, stop/disable so it doesn't interfere
     if systemctl list-unit-files | grep -q '^ecs.service'; then
       systemctl stop ecs || true
       systemctl disable ecs || true
     fi
 
-    # Basics
-    dnf -y makecache || true
-    dnf -y install curl ca-certificates jq || true
-
-    # Install Docker using Docker's official convenience script (works on AL2023/AL2)
-    curl -fsSL https://get.docker.com | sh
+    dnf -y makecache
+    dnf -y install docker jq curl
 
     systemctl enable --now docker
     usermod -aG docker ec2-user || true
 
-    echo "[user-data] docker version:"
-    docker version || true
+    echo "[user-data] docker info"
+    docker info || true
 
-    # Pull images (fail fast if no outbound)
+    # Pull required images
     docker pull selenium/hub:4.25.0
     docker pull selenium/node-chrome:4.25.0
     docker pull selenium/node-firefox:4.25.0
 
-    # Run containers with host networking to avoid port-mapping issues
+    # Clean previous (if rerun)
     docker rm -f selenium-hub chrome firefox || true
 
-    # Hub (binds to host's 4444)
+    # Run hub on host network (binds :4444 on the host)
     docker run -d --name selenium-hub --restart unless-stopped \
       --network host \
       -e SE_OPTS="--relax-checks true" \
@@ -274,17 +207,16 @@ resource "aws_instance" "grid" {
       selenium/hub:4.25.0
 
     # Wait for hub to be ready locally
-    for i in $(seq 1 90); do
+    for i in $(seq 1 120); do
       if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
         echo "[user-data] hub is ready"
         break
       fi
-      echo "[user-data] waiting for hub... ($i/90)"
+      echo "[user-data] waiting hub... ($i/120)"
       sleep 2
     done
 
-    # Nodes (connect to hub on localhost event bus)
-    # With host networking, no -p needs; VNC will still open on 7900 on the host.
+    # Start nodes on host network; talk to hub via localhost
     docker run -d --name chrome --restart unless-stopped \
       --network host \
       --shm-size=2g \
@@ -313,14 +245,14 @@ resource "aws_instance" "grid" {
       -e OTEL_LOGS_EXPORTER=none \
       selenium/node-firefox:4.25.0
 
-    echo "[user-data] docker ps -a:"
-    docker ps -a
+    echo "[user-data] docker ps:"
+    docker ps -a || true
 
-    echo "[user-data] listening ports (expect :4444 and :7900):"
-    ss -ltn | (grep -E ':4444|:7900' || true)
+    echo "[user-data] listening ports:"
+    ss -ltn || true
 
-    # Final hub readiness so CI can immediately probe 4444
-    for i in $(seq 1 120); do
+    # Final readiness
+    for i in $(seq 1 150); do
       if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
         echo "[user-data] DONE. Hub ready."
         exit 0
@@ -328,7 +260,7 @@ resource "aws_instance" "grid" {
       sleep 2
     done
 
-    echo "[user-data] hub not ready after wait; dumping logs..."
+    echo "[user-data] hub NOT ready; dumping logs"
     docker logs selenium-hub || true
     exit 1
   EOF
@@ -357,34 +289,15 @@ resource "aws_route53_record" "grid" {
   name    = var.dns_name
   type    = "A"
   ttl     = 60
-  records = [
-    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
-  ]
+  records = [ var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip ]
 }
 
 #########
 # Outputs
 #########
-output "public_ip" {
-  value = aws_instance.grid.public_ip
-}
-
-output "public_dns" {
-  value = aws_instance.grid.public_dns
-}
-
-output "instance_id" {
-  value = aws_instance.grid.id
-}
-
-output "security_group_id" {
-  value = aws_security_group.grid_sg.id
-}
-
-output "grid_url" {
-  value = "http://${aws_instance.grid.public_ip}:4444"
-}
-
-output "novnc_url" {
-  value = "http://${aws_instance.grid.public_ip}:7900"
-}
+output "public_ip"         { value = aws_instance.grid.public_ip }
+output "public_dns"        { value = aws_instance.grid.public_dns }
+output "instance_id"       { value = aws_instance.grid.id }
+output "security_group_id" { value = aws_security_group.grid_sg.id }
+output "grid_url"          { value = "http://${aws_instance.grid.public_ip}:4444" }
+output "novnc_url"         { value = "http://${aws_instance.grid.public_ip}:7900" }
