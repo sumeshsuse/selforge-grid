@@ -1,5 +1,6 @@
 terraform {
   required_version = ">= 1.5.0"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -9,7 +10,7 @@ terraform {
 }
 
 provider "aws" {
-  # Region comes from the environment (AWS_REGION), set by GitHub Actions.
+  # Region is taken from the environment (AWS_REGION), set by GitHub Actions.
 }
 
 ########################
@@ -75,20 +76,20 @@ resource "aws_key_pair" "gha" {
 module "selenium_grid" {
   source = "./modules/selenium_grid"
 
-  name_prefix     = var.name_prefix
-  instance_type   = var.instance_type
-  volume_size_gb  = var.volume_size_gb
+  name_prefix    = var.name_prefix
+  instance_type  = var.instance_type
+  volume_size_gb = var.volume_size_gb
 
   # Pass the key name only if we created one
-  key_name        = var.create_key_pair ? aws_key_pair.gha[0].key_name : null
+  key_name = var.create_key_pair ? aws_key_pair.gha[0].key_name : null
 
   # Network allow-lists
-  ssh_cidrs       = var.ssh_cidrs
-  grid_cidrs      = var.grid_cidrs
+  ssh_cidrs  = var.ssh_cidrs
+  grid_cidrs = var.grid_cidrs
 
   # Leave VPC/subnet null to auto-pick default VPC + first subnet
-  vpc_id          = null
-  subnet_id       = null
+  vpc_id    = null
+  subnet_id = null
 
   # IAM/EIP/Route53 are off by default; wire these later if you decide to use them
   create_iam_role = false
@@ -127,6 +128,6 @@ output "grid_url" {
 }
 
 output "novnc_url" {
-  description = "noVNC URL for Chrome node"
+  description = "noVNC URL (Chrome node)"
   value       = module.selenium_grid.novnc_url
 }

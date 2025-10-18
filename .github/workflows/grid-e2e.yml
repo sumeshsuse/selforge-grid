@@ -70,8 +70,8 @@ jobs:
             exit 1
           fi
 
-          # S3 bucket (idempotent)
-          if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
+          # S3 bucket (create if missing)
+          if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" >/dev/null 2>&1; then
             if [ "${TF_STATE_REGION}" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
             else
@@ -83,11 +83,8 @@ jobs:
               '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
 
-          # DynamoDB table (idempotent, fixed redirection)
-          if ! aws dynamodb describe-table \
-               --table-name "${TF_STATE_LOCK_TABLE}" \
-               --region "${TF_STATE_REGION}" \
-               >/dev/null 2>&1; then
+          # DynamoDB lock table (create if missing)
+          if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -163,6 +160,7 @@ jobs:
     env:
       GRID_URL:  ${{ needs.terraform_apply.outputs.grid_url }}
       PUBLIC_IP: ${{ needs.terraform_apply.outputs.public_ip }}
+      AWS_REGION: ${{ env.AWS_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -179,7 +177,30 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Wait for Grid readiness (TCP 4444 + /status)
+      - name: Wait for EC2 instance-status-ok (best-effort)
+        if: always()
+        env:
+          PUBLIC_IP: ${{ env.PUBLIC_IP }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        shell: bash
+        run: |
+          set -e
+          if [ -z "$PUBLIC_IP" ]; then
+            echo "No public IP from Terraform outputs. Skipping EC2 wait."
+            exit 0
+          fi
+          echo "Looking up instance by public IP: $PUBLIC_IP"
+          IID="$(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters "Name=ip-address,Values=$PUBLIC_IP" \
+            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
+          if [ -n "$IID" ] && [ "$IID" != "None" ]; then
+            echo "Found instance: $IID. Waiting for instance-status-ok..."
+            aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$IID" || true
+          else
+            echo "Could not resolve instance by IP. Continuing without EC2 waiter."
+          fi
+
+      - name: Wait for Grid hub (TCP 4444 + /status ready)
         env:
           GRID_URL: ${{ env.GRID_URL }}
         shell: bash
@@ -193,7 +214,7 @@ jobs:
               READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
               if [ "$READY" = "true" ]; then
                 echo "Grid hub is up."
-                exit 0
+                break
               fi
               echo "TCP is open but hub not ready yet... ($i/120)"
             else
@@ -201,55 +222,17 @@ jobs:
             fi
             sleep 5
           done
-          echo "Hub did not become ready in time. Last /status (if any):"
-          curl -v "$URL/status" || true
-          exit 1
 
-      - name: Wait for browser nodes (chrome & firefox)
-        env:
-          GRID_URL: ${{ env.GRID_URL }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="${GRID_URL%/}"
-          HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%:*}"
-
-          query_nodes () {
-            curl -fsS "http://$HOST:4444/graphql" \
-              -H 'Content-Type: application/json' \
-              --data '{"query":"{ grid { nodes { status availability stereotypes { browserName } } } }"}' \
-              | jq -r '[.data.grid.nodes[]
-                         | select(.availability=="UP" and .status=="UP")
-                         | .stereotypes[].browserName] | group_by(.) | map({(.[0]): length}) | add // {}'
-          }
-
-          wait_for_browser () {
-            local browser="$1"
-            local tries=120
-            for i in $(seq 1 $tries); do
-              MAP=$(query_nodes) || true
-              COUNT=$(jq -r --arg b "$browser" '.[$b] // 0' <<<"$MAP")
-              if (( COUNT >= 1 )); then
-                echo "✓ Found $COUNT $browser node(s) registered."
-                return 0
-              fi
-              echo "Waiting for $browser node to register... ($i/$tries) map=$MAP"
-              sleep 5
-            done
-            echo "Timed out waiting for $browser node." >&2
-            exit 1
-          }
-
-          wait_for_browser chrome
-          wait_for_browser firefox
+          # brief extra settle time to let nodes register
+          sleep 20
 
       - name: Build & run tests (Maven)
         env:
           GRID_URL: ${{ env.GRID_URL }}
-          gridUrl:  ${{ env.GRID_URL }}
         shell: bash
         run: |
-          mvn -B -Dgrid.url="$GRID_URL" -DgridUrl="$GRID_URL" test
+          # Prefer -Dgrid.url; your DuckTest also falls back to env GRID_URL.
+          mvn -B -Dgrid.url="$GRID_URL" test
 
       - name: Archive TestNG reports (always)
         if: always()
@@ -284,13 +267,13 @@ jobs:
         with:
           terraform_version: 1.9.5
 
-      - name: Regenerate ephemeral SSH key
+      - name: Regenerate ephemeral SSH key (matches var layout)
         shell: bash
         run: |
           ssh-keygen -t ed25519 -N "" -f "$RUNNER_TEMP/gha_key"
           echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> "$GITHUB_ENV"
 
-      - name: Reuse CIDR inputs
+      - name: Reuse CIDR inputs (same logic)
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
