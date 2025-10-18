@@ -80,7 +80,7 @@ jobs:
             aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration \
               '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
-          if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
+          if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2&> /dev/null; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
@@ -256,7 +256,7 @@ jobs:
               echo "TCP is open but hub not ready yet... ($i/120)"
             else
               echo "Port 4444 not open yet... ($i/120)"
-            end
+            fi
             sleep 5
           done
           echo "Hub did not become ready in time. Last /status (if any):"
