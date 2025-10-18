@@ -23,7 +23,7 @@ public class DuckTest {
     public void canOpenDuckDuckGo() {
         driver.get("https://duckduckgo.com/");
         Assert.assertTrue(driver.getTitle().toLowerCase().contains("duck"),
-                "Page title should contain 'duck'");
+                "Page title should contain 'duck'!");
     }
 
     @AfterMethod(alwaysRun = true)
