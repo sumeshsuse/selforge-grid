@@ -1,80 +1,57 @@
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
+    aws = { source = "hashicorp/aws", version = ">= 5.0" }
   }
 }
 
-provider "aws" {
-  # Region comes from AWS_REGION env / OIDC in the workflow
-}
+provider "aws" {}  # Region comes from AWS_REGION environment variable (set by GitHub Actions)
 
 module "selenium_grid" {
   source = "./modules/selenium_grid"
 
-  # Required / common vars
-  instance_type        = var.instance_type
-  create_key_pair      = var.create_key_pair
-  ssh_public_key_path  = var.ssh_public_key_path
-  ssh_cidrs            = var.ssh_cidrs
-  grid_cidrs           = var.grid_cidrs
+  name_prefix   = "selenium-grid"
+  instance_type = var.instance_type
 
-  # Optional DNS (leave null to disable)
-  route53_zone_id      = var.route53_zone_id
-  route53_record_name  = var.route53_record_name
+  # Key pair is handled by the workflow via create_key_pair + ssh_public_key_path.
+  # If you already have a key in AWS, set key_name to use it; otherwise leave null.
+  key_name = null
+
+  # Allowlists from workflow inputs (default open for grid; SSH empty in CI)
+  ssh_cidrs  = var.ssh_cidrs
+  grid_cidrs = var.grid_cidrs
+
+  # Optional extras (left off by default)
+  create_eip      = false
+  create_route53  = false
+  hosted_zone_id  = null
+  dns_name        = null
 }
 
-# ——— Re-export handy outputs ———
-output "instance_id"      { value = module.selenium_grid.instance_id }
-output "public_ip"        { value = module.selenium_grid.public_ip }
-output "public_dns"       { value = module.selenium_grid.public_dns }
-output "security_group_id"{ value = module.selenium_grid.security_group_id }
-output "grid_url"         { value = module.selenium_grid.grid_url }
-output "novnc_url_chrome" { value = module.selenium_grid.novnc_url_chrome }
-output "route53_fqdn"     { value = module.selenium_grid.route53_fqdn }
-
-# Root-level variables (kept in sync with module)
-variable "create_key_pair" {
-  description = "Whether to create an ephemeral EC2 key pair from provided public key"
-  type        = bool
-  default     = true
-}
-
-variable "ssh_public_key_path" {
-  description = "Path to a public key file (used when create_key_pair=true)"
+# ── Root variables (mapped from the workflow) ──────────────────────────────────
+variable "instance_type" {
+  description = "EC2 instance type"
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
+  default     = "t3.large"
 }
 
 variable "ssh_cidrs" {
-  description = "CIDR blocks allowed to SSH (22)"
+  description = "CIDRs allowed SSH (22)"
   type        = list(string)
   default     = []
 }
 
 variable "grid_cidrs" {
-  description = "CIDR blocks allowed to reach Selenium Grid (4444) and noVNC (7900)"
+  description = "CIDRs allowed to reach Grid (4444) and noVNC (7900)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
 
-variable "instance_type" {
-  description = "EC2 instance type for the grid"
-  type        = string
-  default     = "t3.large"
-}
-
-variable "route53_zone_id" {
-  description = "Optional Route53 hosted zone ID to create a DNS record"
-  type        = string
-  default     = null
-}
-
-variable "route53_record_name" {
-  description = "Optional DNS name for Selenium Grid (e.g., grid.example.com)"
-  type        = string
-  default     = null
-}
+# ── Re-export outputs for the workflow ─────────────────────────────────────────
+output "instance_id"       { value = module.selenium_grid.instance_id }
+output "public_ip"         { value = module.selenium_grid.public_ip }
+output "public_dns"        { value = module.selenium_grid.public_dns }
+output "security_group_id" { value = module.selenium_grid.security_group_id }
+output "grid_url"          { value = module.selenium_grid.grid_url }
+output "novnc_url"         { value = module.selenium_grid.novnc_url_chrome }
+output "route53_fqdn"      { value = module.selenium_grid.route53_fqdn }
