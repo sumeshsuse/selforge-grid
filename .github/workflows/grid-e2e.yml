@@ -12,7 +12,7 @@ on:
         required: false
         default: "[]"
   push:
-    branches: ["main"]
+    branches: [ "main" ]
     paths:
       - "iac/**"
       - "src/**"
@@ -166,9 +166,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install jq (used in debug steps)
-        run: sudo apt-get update && sudo apt-get install -y jq
-
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -253,24 +250,65 @@ jobs:
             if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/4444" 2>/dev/null; then
               READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
               if [ "$READY" = "true" ]; then
-                echo "✅ Grid is ready."
+                echo "Grid hub is up."
                 exit 0
               fi
-              echo "🟡 TCP is open but Grid not ready yet… ($i/120)"
+              echo "TCP is open but hub not ready yet... ($i/120)"
             else
-              echo "⛔ Port 4444 not open yet… ($i/120)"
-            fi
+              echo "Port 4444 not open yet... ($i/120)"
+            end
             sleep 5
           done
-          echo "❌ Grid did not become ready in time. Last /status (if any):"
+          echo "Hub did not become ready in time. Last /status (if any):"
           curl -v "$URL/status" || true
           exit 1
+
+      - name: Wait for browser nodes (chrome & firefox)
+        env:
+          GRID_URL: ${{ env.GRID_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="${GRID_URL%/}"
+          HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%:*}"
+
+          query_nodes () {
+            curl -fsS "http://$HOST:4444/graphql" \
+              -H 'Content-Type: application/json' \
+              --data '{"query":"{ grid { nodes { status availability stereotypes { browserName } } } }"}' \
+              | jq -r '[.data.grid.nodes[]
+                         | select(.availability=="UP" and .status=="UP")
+                         | .stereotypes[].browserName] | group_by(.) | map({(.[0]): length}) | add // {}'
+          }
+
+          wait_for_browser () {
+            local browser="$1"
+            local tries=120
+            for i in $(seq 1 $tries); do
+              MAP=$(query_nodes) || true
+              COUNT=$(jq -r --arg b "$browser" '.[$b] // 0' <<<"$MAP")
+              if (( COUNT >= 1 )); then
+                echo "✓ Found $COUNT $browser node(s) registered."
+                return 0
+              fi
+              echo "Waiting for $browser node to register... ($i/$tries) map=$MAP"
+              sleep 5
+            done
+            echo "Timed out waiting for $browser node." >&2
+            exit 1
+          }
+
+          wait_for_browser chrome
+          wait_for_browser firefox
 
       - name: Build & run tests (Maven)
         env:
           GRID_URL: ${{ env.GRID_URL }}
+          gridUrl:  ${{ env.GRID_URL }}   # also expose for testng.xml ${gridUrl}
         shell: bash
-        run: mvn -B -Dgrid.url="$GRID_URL" test
+        run: |
+          mvn -B -Dgrid.url="$GRID_URL" -DgridUrl="$GRID_URL" test
 
       - name: Archive TestNG reports (always)
         if: always()
