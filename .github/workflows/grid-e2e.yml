@@ -150,12 +150,14 @@ jobs:
       - name: Maven Tests (point to Fargate Grid)
         env:
           GRID_URL: ${{ steps.tfout.outputs.grid_url }}
-        run: mvn -B -Dgrid.url="$GRID_URL" test
+        # Write allure results where the plugin expects them
+        run: mvn -B -Dgrid.url="$GRID_URL" -Dallure.results.directory=target/allure-results test
 
-      # --- Allure HTML build & S3 publish (added) -----------------------------
+      # --- Allure HTML build & S3 publish ------------------------------------
 
       - name: Build Allure HTML
-        run: mvn -B io.qameta.allure:allure-maven:report
+        # Explicitly tell the plugin where results are
+        run: mvn -B -Dallure.results.directory=target/allure-results io.qameta.allure:allure-maven:report
 
       - name: Publish Allure to S3 (versioned + latest)
         env:
@@ -164,23 +166,25 @@ jobs:
         shell: bash
         run: |
           set -e
+          if [ -z "${BUCKET}" ]; then
+            echo "ℹ️ REPORTS_BUCKET not set; skipping S3 publish."
+            exit 0
+          fi
+
           SRC="target/site/allure-maven"
           if [ ! -d "$SRC" ]; then
             echo "❌ Allure report folder not found: $SRC"
+            echo "Did tests write to target/allure-results?"
             exit 1
           fi
 
           # versioned path for traceability
           aws s3 sync "$SRC" "s3://$BUCKET/$RUN_PREFIX" \
-            --delete \
-            --cache-control "no-cache" \
-            --metadata-directive REPLACE
+            --delete --cache-control "no-cache" --metadata-directive REPLACE
 
           # rolling "latest" pointer
           aws s3 sync "$SRC" "s3://$BUCKET/grid/allure/latest" \
-            --delete \
-            --cache-control "no-cache" \
-            --metadata-directive REPLACE
+            --delete --cache-control "no-cache" --metadata-directive REPLACE
 
           VER_URL="s3://$BUCKET/$RUN_PREFIX/index.html"
           LATEST_URL="s3://$BUCKET/grid/allure/latest/index.html"
@@ -194,7 +198,6 @@ jobs:
             echo "- Latest: \`$LATEST_URL\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # (Optional) Keep report as a GitHub artifact too
       - name: Upload Allure HTML as artifact
         uses: actions/upload-artifact@v4
         with:

@@ -18,7 +18,6 @@
         <!-- Allure -->
         <allure.testng.version>2.26.0</allure.testng.version>
         <allure.maven.version>2.12.0</allure.maven.version>
-        <!-- This is the Allure *report UI* version the plugin generates -->
         <allure.report.version>2.29.0</allure.report.version>
     </properties>
 
@@ -46,7 +45,7 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Optional: keep logs quiet during tests -->
+        <!-- Optional: quiet logs during tests -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
@@ -67,7 +66,7 @@
                 </configuration>
             </plugin>
 
-            <!-- Run TestNG suite and forward grid URL props -->
+            <!-- TestNG + pass Allure results dir to listener -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
@@ -77,14 +76,15 @@
                         <suiteXmlFile>testng.xml</suiteXmlFile>
                     </suiteXmlFiles>
                     <systemPropertyVariables>
-                        <!-- Pass through whatever you provide on the CLI -->
                         <grid.url>${grid.url}</grid.url>
                         <GRID_URL>${GRID_URL}</GRID_URL>
+                        <!-- Make the Allure TestNG listener write here -->
+                        <allure.results.directory>${project.build.directory}/allure-results</allure.results.directory>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
 
-            <!-- Allure: generate HTML report on `mvn verify` -->
+            <!-- Allure: generate HTML report (we still call it explicitly in CI) -->
             <plugin>
                 <groupId>io.qameta.allure</groupId>
                 <artifactId>allure-maven</artifactId>
