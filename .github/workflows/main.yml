@@ -28,10 +28,10 @@ env:
   AWS_REGION: us-east-1
   IAC_DIR: iac
 
-  # Remote state config: set these as repo secrets
-  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}          # e.g. selforge-grid-tfstate-<accountid>
-  TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}          # e.g. us-east-1
-  TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}  # e.g. tf-locks-selforge-grid
+  # Remote state config (set these as repo secrets)
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+  TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+  TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
   TF_STATE_KEY: selforge-grid/${{ github.ref_name }}/terraform.tfstate
 
 jobs:
@@ -66,13 +66,11 @@ jobs:
       - name: Bootstrap remote state backend (idempotent)
         run: |
           set -euo pipefail
-
           if [ -z "${TF_STATE_BUCKET}" ] || [ -z "${TF_STATE_REGION}" ] || [ -z "${TF_STATE_LOCK_TABLE}" ]; then
             echo "ERROR: TF_STATE_BUCKET / TF_STATE_REGION / TF_STATE_LOCK_TABLE must be set as repo secrets." >&2
             exit 1
           fi
-
-          # Create S3 bucket if it doesn't exist
+          # Create S3 bucket if needed
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
             if [ "${TF_STATE_REGION}" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
@@ -84,8 +82,7 @@ jobs:
             aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration \
               '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
           fi
-
-          # Create DynamoDB lock table if it doesn't exist
+          # Create DynamoDB lock table if needed
           if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
@@ -100,6 +97,19 @@ jobs:
         run: |
           ssh-keygen -t ed25519 -N "" -f $RUNNER_TEMP/gha_key
           echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> $GITHUB_ENV
+
+      - name: Resolve CIDR inputs (no expression quoting issues)
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
+            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> $GITHUB_ENV
+          else
+            echo 'SSH_CIDRS=[]' >> $GITHUB_ENV
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.grid_cidrs }}" ]; then
+            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> $GITHUB_ENV
+          else
+            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> $GITHUB_ENV
+          fi
 
       - name: Terraform init (remote backend S3 + DynamoDB)
         working-directory: ${{ env.IAC_DIR }}
@@ -116,9 +126,9 @@ jobs:
         run: |
           terraform apply -auto-approve \
             -var="create_key_pair=true" \
-            -var="ssh_public_key_path=${{ env.SSH_PUBLIC_KEY_PATH }}" \
-            -var="ssh_cidrs=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ssh_cidrs || '[]' }}" \
-            -var="grid_cidrs=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.grid_cidrs || '["0.0.0.0/0"]' }}"
+            -var="ssh_public_key_path=${SSH_PUBLIC_KEY_PATH}" \
+            -var="ssh_cidrs=${SSH_CIDRS}" \
+            -var="grid_cidrs=${GRID_CIDRS}"
 
       - name: Capture Terraform outputs
         id: out
@@ -195,6 +205,19 @@ jobs:
           ssh-keygen -t ed25519 -N "" -f $RUNNER_TEMP/gha_key
           echo "SSH_PUBLIC_KEY_PATH=$RUNNER_TEMP/gha_key.pub" >> $GITHUB_ENV
 
+      - name: Reuse CIDR inputs (same logic)
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.ssh_cidrs }}" ]; then
+            echo "SSH_CIDRS=${{ github.event.inputs.ssh_cidrs }}" >> $GITHUB_ENV
+          else
+            echo 'SSH_CIDRS=[]' >> $GITHUB_ENV
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.grid_cidrs }}" ]; then
+            echo "GRID_CIDRS=${{ github.event.inputs.grid_cidrs }}" >> $GITHUB_ENV
+          else
+            echo 'GRID_CIDRS=["0.0.0.0/0"]' >> $GITHUB_ENV
+          fi
+
       - name: Terraform init (remote backend)
         working-directory: ${{ env.IAC_DIR }}
         run: |
@@ -210,6 +233,6 @@ jobs:
         run: |
           terraform destroy -auto-approve \
             -var="create_key_pair=true" \
-            -var="ssh_public_key_path=${{ env.SSH_PUBLIC_KEY_PATH }}" \
-            -var="ssh_cidrs=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ssh_cidrs || '[]' }}" \
-            -var="grid_cidrs=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.grid_cidrs || '["0.0.0.0/0"]' }}"
+            -var="ssh_public_key_path=${SSH_PUBLIC_KEY_PATH}" \
+            -var="ssh_cidrs=${SSH_CIDRS}" \
+            -var="grid_cidrs=${GRID_CIDRS}"
