@@ -42,7 +42,7 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Optional: quiet SLF4J warnings during tests -->
+        <!-- Quiet SLF4J warnings during tests -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
@@ -53,7 +53,7 @@
 
     <build>
         <plugins>
-            <!-- Ensure Java 17 bytecode -->
+            <!-- Compile for Java 17 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -63,7 +63,7 @@
                 </configuration>
             </plugin>
 
-            <!-- Run TestNG suite and pass -DgridUrl if provided -->
+            <!-- Run TestNG suite and forward -DgridUrl / -Dgrid.url -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
@@ -73,14 +73,16 @@
                         <suiteXmlFile>testng.xml</suiteXmlFile>
                     </suiteXmlFiles>
                     <systemPropertyVariables>
-                        <gridUrl>${env.gridUrl}</gridUrl>
+                        <!-- These mirror whatever you pass with -D... -->
+                        <gridUrl>${gridUrl}</gridUrl>
+                        <grid.url>${grid.url}</grid.url>
                     </systemPropertyVariables>
                     <!-- Optional: re-run flaky tests once -->
                     <!-- <rerunFailingTestsCount>1</rerunFailingTestsCount> -->
                 </configuration>
             </plugin>
 
-            <!-- Allure: generate HTML report during `mvn verify` -->
+            <!-- Allure: generate HTML report on `mvn verify` -->
             <plugin>
                 <groupId>io.qameta.allure</groupId>
                 <artifactId>allure-maven</artifactId>
@@ -103,7 +105,6 @@
         </plugins>
     </build>
 
-    <!-- Optional: make `mvn site` include Allure link -->
     <reporting>
         <plugins>
             <plugin>

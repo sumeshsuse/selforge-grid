@@ -6,14 +6,13 @@
 
     <test name="Chrome">
         <parameter name="browser" value="chrome"/>
-        <!-- Let code apply a default if -DgridUrl is missing -->
-        <parameter name="gridUrl" value="${gridUrl}"/>
+        <parameter name="gridUrl" value="${grid.url}"/>   <!-- was ${gridUrl} -->
         <classes><class name="ui.DuckTest"/></classes>
     </test>
 
     <test name="Firefox">
         <parameter name="browser" value="firefox"/>
-        <parameter name="gridUrl" value="${gridUrl}"/>
+        <parameter name="gridUrl" value="${grid.url}"/>   <!-- was ${gridUrl} -->
         <classes><class name="ui.DuckTest"/></classes>
     </test>
 </suite>
