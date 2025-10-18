@@ -1,7 +1,3 @@
-############################
-# iac/modules/selenium_grid/main.tf
-############################
-
 terraform {
   required_providers {
     aws = {
@@ -97,22 +93,29 @@ data "aws_subnets" "default" {
 }
 
 locals {
-  effective_vpc_id    = var.vpc_id != null ? var.vpc_id : data.aws_vpc.default[0].id
+  effective_vpc_id    = var.vpc_id    != null ? var.vpc_id    : data.aws_vpc.default[0].id
   effective_subnet_id = var.subnet_id != null ? var.subnet_id : data.aws_subnets.default[0].ids[0]
 
   ssh_allow  = var.ssh_cidrs
   grid_allow = var.grid_cidrs
 }
 
-############################################
-# AMI: Standard Amazon Linux 2023 (non-ECS)
-############################################
-data "aws_ssm_parameter" "al2023" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
-}
+###########################
+# AMI (Amazon Linux 2023)
+###########################
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
 
-locals {
-  al2023_ami_id = data.aws_ssm_parameter.al2023.value
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-kernel-6.1-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 
 #####################
@@ -123,7 +126,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Allow Selenium Grid and optional SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH 22 (optional)
+  # SSH 22
   dynamic "ingress" {
     for_each = local.ssh_allow
     content {
@@ -147,7 +150,7 @@ resource "aws_security_group" "grid_sg" {
     }
   }
 
-  # noVNC 7900
+  # noVNC 7900 (Chrome VNC)
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
@@ -164,14 +167,11 @@ resource "aws_security_group" "grid_sg" {
     from_port        = 0
     to_port          = 0
     protocol         = "-1"
-    #  security groups use either cidr or ipv6 below:
     cidr_blocks      = ["0.0.0.0/0"]
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = {
-    Name = "${var.name_prefix}-sg"
-  }
+  tags = { Name = "${var.name_prefix}-sg" }
 }
 
 ############
@@ -216,13 +216,14 @@ resource "aws_iam_instance_profile" "grid" {
 # EC2 host
 #############
 resource "aws_instance" "grid" {
-  ami                         = local.al2023_ami_id
+  ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
   key_name                    = var.key_name
   subnet_id                   = local.effective_subnet_id
   vpc_security_group_ids      = [aws_security_group.grid_sg.id]
   associate_public_ip_address = true
-  iam_instance_profile        = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
+
+  iam_instance_profile = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
 
   root_block_device {
     volume_size = var.volume_size_gb
@@ -236,144 +237,103 @@ resource "aws_instance" "grid" {
     exec > >(tee -a /var/log/user-data.log) 2>&1
     echo "[user-data] start $(date -Iseconds)"
 
-    # If on ECS-optimized image (shouldn't be), disable the agent
+    # On ECS AMIs, stop/disable the ECS agent so it doesn't conflict with Docker
     if systemctl list-unit-files | grep -q '^ecs.service'; then
       systemctl stop ecs || true
       systemctl disable ecs || true
     fi
 
-    dnf -y makecache
-    dnf -y install docker curl wget jq tar
+    # Basics
+    dnf -y makecache || true
+    dnf -y install curl ca-certificates jq || true
+
+    # Install Docker using Docker's official convenience script (works on AL2023/AL2)
+    curl -fsSL https://get.docker.com | sh
 
     systemctl enable --now docker
-    sleep 3
+    usermod -aG docker ec2-user || true
 
-    # Docker Compose v2
-    mkdir -p /usr/local/lib/docker/cli-plugins
-    curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
-      -o /usr/local/lib/docker/cli-plugins/docker-compose
-    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-    docker compose version || true
+    echo "[user-data] docker version:"
+    docker version || true
 
-    mkdir -p /opt/grid/logs/hub /opt/grid/logs/chrome /opt/grid/logs/firefox
-    mkdir -p /opt/grid/downloads/chrome /opt/grid/downloads/firefox
+    # Pull images (fail fast if no outbound)
+    docker pull selenium/hub:4.25.0
+    docker pull selenium/node-chrome:4.25.0
+    docker pull selenium/node-firefox:4.25.0
 
-    cat > /opt/grid/docker-compose.yml <<'YAML'
-    version: "3.9"
-    services:
-      selenium-hub:
-        image: selenium/hub:4.25.0
-        platform: linux/amd64
-        container_name: selenium-hub
-        ports:
-          - "4444:4444"
-        environment:
-          - SE_OPTS=--relax-checks true
-          - OTEL_TRACES_EXPORTER=none
-          - OTEL_METRICS_EXPORTER=none
-          - OTEL_LOGS_EXPORTER=none
-        volumes:
-          - "./logs/hub:/opt/selenium/logs"
-        healthcheck:
-          test: ["CMD", "bash", "-lc", "wget -q --spider http://localhost:4444/status"]
-          interval: 5s
-          timeout: 3s
-          retries: 60
-          start_period: 10s
-        restart: unless-stopped
-        logging:
-          driver: local
-          options:
-            max-size: "10m"
-            max-file: "3"
+    # Run containers with host networking to avoid port-mapping issues
+    docker rm -f selenium-hub chrome firefox || true
 
-      chrome:
-        image: selenium/node-chrome:4.25.0
-        platform: linux/amd64
-        shm_size: 2gb
-        depends_on:
-          selenium-hub:
-            condition: service_healthy
-        environment:
-          - SE_EVENT_BUS_HOST=selenium-hub
-          - SE_EVENT_BUS_PUBLISH_PORT=4442
-          - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
-          - SE_NODE_MAX_SESSIONS=1
-          - SE_SCREEN_WIDTH=1920
-          - SE_SCREEN_HEIGHT=1080
-          - OTEL_TRACES_EXPORTER=none
-          - OTEL_METRICS_EXPORTER=none
-          - OTEL_LOGS_EXPORTER=none
-        ports:
-          - "7900:7900"
-        volumes:
-          - "./logs/chrome:/opt/selenium/logs"
-          - "./downloads/chrome:/home/seluser/Downloads"
-        ulimits:
-          nofile:
-            soft: 32768
-            hard: 32768
-        restart: unless-stopped
-        logging:
-          driver: local
-          options:
-            max-size: "10m"
-            max-file: "3"
+    # Hub (binds to host's 4444)
+    docker run -d --name selenium-hub --restart unless-stopped \
+      --network host \
+      -e SE_OPTS="--relax-checks true" \
+      -e OTEL_TRACES_EXPORTER=none \
+      -e OTEL_METRICS_EXPORTER=none \
+      -e OTEL_LOGS_EXPORTER=none \
+      selenium/hub:4.25.0
 
-      firefox:
-        image: selenium/node-firefox:4.25.0
-        platform: linux/amd64
-        shm_size: 2gb
-        depends_on:
-          selenium-hub:
-            condition: service_healthy
-        environment:
-          - SE_EVENT_BUS_HOST=selenium-hub
-          - SE_EVENT_BUS_PUBLISH_PORT=4442
-          - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
-          - SE_NODE_MAX_SESSIONS=1
-          - SE_SCREEN_WIDTH=1920
-          - SE_SCREEN_HEIGHT=1080
-          - OTEL_TRACES_EXPORTER=none
-          - OTEL_METRICS_EXPORTER=none
-          - OTEL_LOGS_EXPORTER=none
-        volumes:
-          - "./logs/firefox:/opt/selenium/logs"
-          - "./downloads/firefox:/home/seluser/Downloads"
-        ulimits:
-          nofile:
-            soft: 32768
-            hard: 32768
-        restart: unless-stopped
-        logging:
-          driver: local
-          options:
-            max-size: "10m"
-            max-file: "3"
-    YAML
-
-    echo "[user-data] docker pull + up"
-    docker compose -f /opt/grid/docker-compose.yml pull
-    docker compose -f /opt/grid/docker-compose.yml up -d
-
-    echo "[user-data] waiting for hub readiness..."
-    for i in $(seq 1 120); do
-      if curl -fsS http://localhost:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
+    # Wait for hub to be ready locally
+    for i in $(seq 1 90); do
+      if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
         echo "[user-data] hub is ready"
-        exit 0
+        break
       fi
-      sleep 5
+      echo "[user-data] waiting for hub... ($i/90)"
+      sleep 2
     done
 
-    echo "[user-data] hub NOT ready; last /status and docker ps:"
-    curl -v http://localhost:4444/status || true
+    # Nodes (connect to hub on localhost event bus)
+    # With host networking, no -p needs; VNC will still open on 7900 on the host.
+    docker run -d --name chrome --restart unless-stopped \
+      --network host \
+      --shm-size=2g \
+      -e SE_EVENT_BUS_HOST=127.0.0.1 \
+      -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+      -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+      -e SE_NODE_MAX_SESSIONS=1 \
+      -e SE_SCREEN_WIDTH=1920 \
+      -e SE_SCREEN_HEIGHT=1080 \
+      -e OTEL_TRACES_EXPORTER=none \
+      -e OTEL_METRICS_EXPORTER=none \
+      -e OTEL_LOGS_EXPORTER=none \
+      selenium/node-chrome:4.25.0
+
+    docker run -d --name firefox --restart unless-stopped \
+      --network host \
+      --shm-size=2g \
+      -e SE_EVENT_BUS_HOST=127.0.0.1 \
+      -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
+      -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
+      -e SE_NODE_MAX_SESSIONS=1 \
+      -e SE_SCREEN_WIDTH=1920 \
+      -e SE_SCREEN_HEIGHT=1080 \
+      -e OTEL_TRACES_EXPORTER=none \
+      -e OTEL_METRICS_EXPORTER=none \
+      -e OTEL_LOGS_EXPORTER=none \
+      selenium/node-firefox:4.25.0
+
+    echo "[user-data] docker ps -a:"
     docker ps -a
+
+    echo "[user-data] listening ports (expect :4444 and :7900):"
+    ss -ltn | (grep -E ':4444|:7900' || true)
+
+    # Final hub readiness so CI can immediately probe 4444
+    for i in $(seq 1 120); do
+      if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
+        echo "[user-data] DONE. Hub ready."
+        exit 0
+      fi
+      sleep 2
+    done
+
+    echo "[user-data] hub not ready after wait; dumping logs..."
+    docker logs selenium-hub || true
     exit 1
   EOF
 
-  tags = {
-    Name = "${var.name_prefix}-ec2"
-  }
+  tags = { Name = "${var.name_prefix}-ec2" }
 }
 
 #############
@@ -382,9 +342,7 @@ resource "aws_instance" "grid" {
 resource "aws_eip" "grid" {
   count  = var.create_eip ? 1 : 0
   domain = "vpc"
-  tags = {
-    Name = "${var.name_prefix}-eip"
-  }
+  tags   = { Name = "${var.name_prefix}-eip" }
 }
 
 resource "aws_eip_association" "grid" {
