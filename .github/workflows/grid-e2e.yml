@@ -18,7 +18,7 @@ on:
       - "src/**"
       - "pom.xml"
       - "testng.xml"
-      - ".github/workflows/grid-e2e.yml"  # change this if your file is main.yml
+      - ".github/workflows/grid-e2e.yml"
 
 concurrency:
   group: grid-e2e-${{ github.ref }}
@@ -159,13 +159,25 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Verify GRID_URL present
+        run: |
+          echo "GRID_URL=${GRID_URL}"
+          if [ -z "${GRID_URL}" ]; then
+            echo "GRID_URL is empty; aborting tests." >&2
+            exit 1
+          fi
+
       - name: Quick Grid health (best-effort)
         run: |
-          echo "GRID_URL=$GRID_URL"
-          curl -s "${GRID_URL}/status" || true
+          curl -sS "${GRID_URL}/status" || true
 
       - name: Build & run tests (Maven)
-        run: mvn -B -Dgrid.url="$GRID_URL" test
+        run: |
+          mvn -B \
+            -Dgrid.url="$GRID_URL" \
+            -DgridUrl="$GRID_URL" \
+            -DGRID_URL="$GRID_URL" \
+            test
 
       - name: Archive TestNG reports (always)
         if: always()

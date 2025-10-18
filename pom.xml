@@ -73,7 +73,7 @@
                         <suiteXmlFile>testng.xml</suiteXmlFile>
                     </suiteXmlFiles>
                     <systemPropertyVariables>
-                        <gridUrl>${gridUrl}</gridUrl>
+                        <gridUrl>${env.gridUrl}</gridUrl>
                     </systemPropertyVariables>
                     <!-- Optional: re-run flaky tests once -->
                     <!-- <rerunFailingTestsCount>1</rerunFailingTestsCount> -->
