@@ -50,7 +50,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Access for Selenium Grid and SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH (22) — only if at least one CIDR provided
+  # SSH (22)
   dynamic "ingress" {
     for_each = local.computed_ssh_cidrs
     content {
@@ -150,8 +150,6 @@ resource "aws_instance" "grid" {
   }
 
   user_data_replace_on_change = true
-
-  # NOTE: no single quotes on the heredoc tag; also every "$" in the script is escaped as "$$"
   user_data = <<-EOF
     #!/bin/bash
     set -euxo pipefail
@@ -216,30 +214,90 @@ resource "aws_route53_record" "grid" {
 }
 
 # ── Outputs ────────────────────────────────────────────────────────────────────
-output "instance_id"       { value = aws_instance.grid.id }
-output "public_ip"         { value = coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip) }
-output "public_dns"        { value = aws_instance.grid.public_dns }
-output "security_group_id" { value = aws_security_group.grid_sg.id }
-output "grid_url"          { value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:4444" }
-output "novnc_url_chrome"  { value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:7900" }
+output "instance_id" {
+  value = aws_instance.grid.id
+}
+
+output "public_ip" {
+  value = coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)
+}
+
+output "public_dns" {
+  value = aws_instance.grid.public_dns
+}
+
+output "security_group_id" {
+  value = aws_security_group.grid_sg.id
+}
+
+output "grid_url" {
+  value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:4444"
+}
+
+output "novnc_url_chrome" {
+  value = "http://${coalesce(try(aws_eip.grid[0].public_ip, null), aws_instance.grid.public_ip)}:7900"
+}
+
 output "route53_fqdn" {
   value       = try(aws_route53_record.grid[0].fqdn, null)
   description = "DNS name if Route53 record created"
 }
 
-# ── Variables (consolidated) ───────────────────────────────────────────────────
-variable "name_prefix"      { type = string  default = "selenium-grid" }
-variable "instance_type"    { type = string  default = "t3.large" }
-variable "volume_size_gb"   { type = number  default = 16 }
-variable "vpc_id"           { type = string  default = null }
-variable "subnet_id"        { type = string  default = null }
-variable "key_name"         { type = string  default = null }
-variable "create_iam_role"  { type = bool    default = false }
+# ── Variables (expanded, multi-line) ───────────────────────────────────────────
+variable "name_prefix" {
+  type    = string
+  default = "selenium-grid"
+}
 
-variable "create_eip"       { type = bool    default = false }
-variable "create_route53"   { type = bool    default = false }
-variable "hosted_zone_id"   { type = string  default = null }
-variable "dns_name"         { type = string  default = null }
+variable "instance_type" {
+  type    = string
+  default = "t3.large"
+}
+
+variable "volume_size_gb" {
+  type    = number
+  default = 16
+}
+
+variable "vpc_id" {
+  type    = string
+  default = null
+}
+
+variable "subnet_id" {
+  type    = string
+  default = null
+}
+
+variable "key_name" {
+  type    = string
+  default = null
+}
+
+variable "create_iam_role" {
+  type    = bool
+  default = false
+}
+
+variable "create_eip" {
+  type    = bool
+  default = false
+}
+
+variable "create_route53" {
+  type    = bool
+  default = false
+}
+
+variable "hosted_zone_id" {
+  type    = string
+  default = null
+}
+
+variable "dns_name" {
+  type    = string
+  default = null
+}
 
 variable "ssh_cidrs" {
   description = "CIDR blocks allowed SSH (22)"
