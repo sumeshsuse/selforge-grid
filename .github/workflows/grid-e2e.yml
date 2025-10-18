@@ -14,7 +14,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write    # for OIDC assume role
       contents: read
 
     steps:
@@ -30,6 +30,16 @@ jobs:
       - name: Who am I
         run: aws sts get-caller-identity
 
+      - name: Show Terraform files used by runner
+        run: |
+          set -e
+          echo "Listing ${{ env.IAC_DIR }}:"
+          ls -la "${{ env.IAC_DIR }}"
+          echo "----- main.tf (head) -----"
+          sed -n '1,120p' "${{ env.IAC_DIR }}/main.tf" || true
+          echo "----- main.tf (tail) -----"
+          sed -n '121,999p' "${{ env.IAC_DIR }}/main.tf" || true
+
       - name: Ensure remote state infra (S3/Dynamo)
         shell: bash
         env:
@@ -38,6 +48,8 @@ jobs:
           TF_STATE_LOCK_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
         run: |
           set -euo pipefail
+
+          # Create S3 bucket if missing
           if ! aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
             if [ "${TF_STATE_REGION}" = "${AWS_REGION}" ]; then
               aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${TF_STATE_REGION}"
@@ -47,6 +59,8 @@ jobs:
             fi
             aws s3api put-bucket-versioning --bucket "${TF_STATE_BUCKET}" --versioning-configuration Status=Enabled
           fi
+
+          # Create DynamoDB lock table if missing
           if ! aws dynamodb describe-table --table-name "${TF_STATE_LOCK_TABLE}" >/dev/null 2>&1; then
             aws dynamodb create-table \
               --table-name "${TF_STATE_LOCK_TABLE}" \
@@ -71,21 +85,35 @@ jobs:
             -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
 
+      - name: Terraform Plan (fail if EC2 appears)
+        working-directory: ${{ env.IAC_DIR }}
+        shell: bash
+        run: |
+          set -e
+          terraform plan -no-color | tee plan.txt
+          if grep -q 'aws_instance\.' plan.txt; then
+            echo "❌ Detected aws_instance in plan (old EC2 stack). Ensure iac/main.tf is the Fargate version."
+            exit 1
+          fi
+
       - name: Terraform Apply (Fargate Grid)
-        id: tfapply
         working-directory: ${{ env.IAC_DIR }}
         run: terraform apply -auto-approve
 
-      - name: Capture Outputs
+      - name: Capture Outputs (tolerant)
         id: tfout
         working-directory: ${{ env.IAC_DIR }}
+        shell: bash
         run: |
+          set -e
           GRID_URL="$(terraform output -raw grid_url)"
-          NOVNC_URL="$(terraform output -raw novnc_url)"
+          NOVNC_URL="$(terraform output -raw novnc_url 2>/dev/null || true)"
           echo "grid_url=${GRID_URL}"   >> $GITHUB_OUTPUT
-          echo "novnc_url=${NOVNC_URL}" >> $GITHUB_OUTPUT
+          [ -n "$NOVNC_URL" ] && echo "novnc_url=${NOVNC_URL}" >> $GITHUB_OUTPUT || true
+          echo "Grid URL: $GRID_URL"
+          [ -n "$NOVNC_URL" ] && echo "noVNC URL: $NOVNC_URL" || echo "noVNC URL not defined"
 
-      - name: Wait for ALB:80
+      - name: Wait for ALB:80 and /status
         env:
           GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         shell: bash
@@ -93,7 +121,7 @@ jobs:
           set -e
           URL="${GRID_URL%/}"
           HOST="${URL#http://}"; HOST="${HOST#https://}"; HOST="${HOST%%/*}"; HOST="${HOST%%:*}"
-          echo "Probing $HOST:80"
+          echo "Probing $HOST:80 ..."
           for i in $(seq 1 120); do
             if timeout 2 bash -lc "cat </dev/null > /dev/tcp/$HOST/80" 2>/dev/null; then
               echo "Port 80 is open."
