@@ -102,14 +102,19 @@ locals {
 
 ###########################
 # AMI (Amazon Linux 2023)
+# Prefer NON-ECS AMI; still defensively stop ECS agent in user-data.
 ###########################
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
 
+  # Non-ECS GA kernel 6.1 images (avoid *ecs* in name)
   filter {
     name   = "name"
-    values = ["al2023-ami-*-kernel-6.1-x86_64"]
+    values = [
+      "al2023-ami-2023.*-kernel-6.1-x86_64",
+      "al2023-ami-*-kernel-6.1-x86_64"
+    ]
   }
 
   filter {
@@ -126,7 +131,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Allow Selenium Grid and optional SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH 22 (only if provided)
+  # SSH 22
   dynamic "ingress" {
     for_each = local.ssh_allow
     content {
@@ -142,7 +147,7 @@ resource "aws_security_group" "grid_sg" {
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
-      description = "Grid Hub"
+      description = "Grid"
       from_port   = 4444
       to_port     = 4444
       protocol    = "tcp"
@@ -150,7 +155,7 @@ resource "aws_security_group" "grid_sg" {
     }
   }
 
-  # noVNC 7900 (Chrome node)
+  # noVNC 7900
   dynamic "ingress" {
     for_each = local.grid_allow
     content {
@@ -182,6 +187,7 @@ resource "aws_security_group" "grid_sg" {
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
+
     principals {
       type        = "Service"
       identifiers = ["ec2.amazonaws.com"]
@@ -232,98 +238,141 @@ resource "aws_instance" "grid" {
   }
 
   user_data_replace_on_change = true
+
+  # IMPORTANT: plain heredoc (no single quotes), fully valid bash.
   user_data = <<EOF
 #!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
 echo "[user-data] start $(date -Iseconds)"
 
-# Install Docker (Amazon Linux 2023)
+# --- If this is an ECS-optimized image, stop/disable ECS so it doesn't own Docker ---
+systemctl stop ecs || true
+systemctl disable ecs || true
+systemctl stop amazon-ecs-agent || true
+systemctl disable amazon-ecs-agent || true
+docker rm -f \$(docker ps -aq --filter "name=ecs-agent") 2>/dev/null || true
+
+# --- Docker & Compose ---
 dnf -y makecache
-dnf -y install docker curl wget jq
+dnf -y install docker docker-compose-plugin curl wget jq
 
-# Enable and start Docker
 systemctl enable --now docker
-sleep 3
-docker version || (systemctl status docker || true)
 
-# Create a dedicated Docker network for Grid (idempotent)
-docker network create grid || true
-
-# Pull images (explicit)
-docker pull selenium/hub:4.25.0
-docker pull selenium/node-chrome:4.25.0
-docker pull selenium/node-firefox:4.25.0
-
-# Run Hub
-docker rm -f selenium-hub || true
-docker run -d --restart=unless-stopped --name selenium-hub --network grid \
-  -p 4444:4444 \
-  -e SE_OPTS="--relax-checks true" \
-  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
-  selenium/hub:4.25.0
-
-# Wait for hub port + /status
-echo "[user-data] wait for hub 4444..."
-for i in $(seq 1 120); do
-  if timeout 2 bash -lc "cat </dev/null >/dev/tcp/127.0.0.1/4444" 2>/dev/null; then
-    READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
-    if [ "$READY" = "true" ]; then
-      echo "[user-data] hub is ready"
-      break
-    fi
-    echo "[user-data] 4444 open, but hub not ready yet... ($i/120)"
-  else
-    echo "[user-data] 4444 not open yet... ($i/120)"
+# Wait until Docker is really up
+for i in \$(seq 1 20); do
+  if docker info >/dev/null 2>&1; then
+    break
   fi
-  sleep 5
+  echo "[user-data] waiting for docker... (\$i/20)"
+  sleep 3
 done
+docker info
 
-# Start Chrome node (expose noVNC 7900)
-docker rm -f node-chrome || true
-docker run -d --restart=unless-stopped --name node-chrome --network grid \
-  -p 7900:7900 \
-  -e SE_EVENT_BUS_HOST=selenium-hub \
-  -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
-  -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
-  -e SE_NODE_MAX_SESSIONS=1 \
-  -e SE_SCREEN_WIDTH=1920 \
-  -e SE_SCREEN_HEIGHT=1080 \
-  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
-  --shm-size="2g" \
-  selenium/node-chrome:4.25.0
+# --- Project dirs ---
+mkdir -p /opt/grid/logs/hub /opt/grid/logs/chrome /opt/grid/logs/firefox
+mkdir -p /opt/grid/downloads/chrome /opt/grid/downloads/firefox
+cd /opt/grid
 
-# Start Firefox node
-docker rm -f node-firefox || true
-docker run -d --restart=unless-stopped --name node-firefox --network grid \
-  -e SE_EVENT_BUS_HOST=selenium-hub \
-  -e SE_EVENT_BUS_PUBLISH_PORT=4442 \
-  -e SE_EVENT_BUS_SUBSCRIBE_PORT=4443 \
-  -e SE_NODE_MAX_SESSIONS=1 \
-  -e SE_SCREEN_WIDTH=1920 \
-  -e SE_SCREEN_HEIGHT=1080 \
-  -e OTEL_TRACES_EXPORTER=none -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none \
-  --shm-size="2g" \
-  selenium/node-firefox:4.25.0
+# --- Compose file ---
+cat > /opt/grid/docker-compose.yml <<'YAML'
+version: "3.9"
+services:
+  hub:
+    image: selenium/hub:4.25.0
+    container_name: selenium-hub
+    ports:
+      - "4444:4444"
+    environment:
+      - SE_OPTS=--relax-checks true
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    volumes:
+      - "./logs/hub:/opt/selenium/logs"
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "wget -q --spider http://localhost:4444/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
 
-echo "[user-data] containers:"
+  chrome:
+    image: selenium/node-chrome:4.25.0
+    shm_size: 2gb
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      - SE_EVENT_BUS_HOST=hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SCREEN_WIDTH=1920
+      - SE_SCREEN_HEIGHT=1080
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    ports:
+      - "7900:7900"
+    volumes:
+      - "./logs/chrome:/opt/selenium/logs"
+      - "./downloads/chrome:/home/seluser/Downloads"
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+
+  firefox:
+    image: selenium/node-firefox:4.25.0
+    shm_size: 2gb
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      - SE_EVENT_BUS_HOST=hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_SCREEN_WIDTH=1920
+      - SE_SCREEN_HEIGHT=1080
+      - OTEL_TRACES_EXPORTER=none
+      - OTEL_METRICS_EXPORTER=none
+      - OTEL_LOGS_EXPORTER=none
+    volumes:
+      - "./logs/firefox:/opt/selenium/logs"
+      - "./downloads/firefox:/home/seluser/Downloads"
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+YAML
+
+echo "[user-data] docker compose pull + up"
+docker compose -f /opt/grid/docker-compose.yml pull
+docker compose -f /opt/grid/docker-compose.yml up -d
+
+echo "[user-data] docker ps:"
 docker ps -a
 
-# Final readiness verify (up to 10 min)
-for i in $(seq 1 120); do
-  READY="$(curl -fsS http://127.0.0.1:4444/status | jq -r '.value.ready // .ready // empty' || true)"
-  if [ "$READY" = "true" ]; then
-    echo "[user-data] Grid READY ✅"
+# --- Wait for hub ---
+for i in \$(seq 1 120); do
+  if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
+    echo "[user-data] hub is ready"
     exit 0
   fi
+  echo "[user-data] hub not ready yet... (\$i/120)"
   sleep 5
 done
 
-echo "[user-data] Grid NOT ready ❌. Dumping status and logs."
+echo "[user-data] hub NOT ready; dump logs"
 curl -v http://127.0.0.1:4444/status || true
 docker logs selenium-hub || true
-docker logs node-chrome || true
-docker logs node-firefox || true
+docker logs \$(docker ps -aq --filter "name=chrome") || true
+docker logs \$(docker ps -aq --filter "name=firefox") || true
 exit 1
 EOF
 
