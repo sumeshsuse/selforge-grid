@@ -10,71 +10,20 @@ terraform {
 ################
 # Module inputs
 ################
-variable "name_prefix" {
-  type    = string
-  default = "selenium-grid"
-}
+variable "name_prefix"      { type = string  default = "selenium-grid" }
+variable "instance_type"    { type = string  default = "t3.large" }
+variable "volume_size_gb"   { type = number  default = 35 }
+variable "key_name"         { type = string  default = null }   # existing key pair name (or null)
+variable "vpc_id"           { type = string  default = null }
+variable "subnet_id"        { type = string  default = null }
+variable "ssh_cidrs"        { type = list(string) default = [] }
+variable "grid_cidrs"       { type = list(string) default = ["0.0.0.0/0"] }
 
-variable "instance_type" {
-  type    = string
-  default = "t3.large"
-}
-
-variable "volume_size_gb" {
-  type    = number
-  default = 35
-}
-
-variable "key_name" {
-  type        = string
-  default     = null
-  description = "Existing EC2 key pair name (or null)"
-}
-
-variable "vpc_id" {
-  type    = string
-  default = null
-}
-
-variable "subnet_id" {
-  type    = string
-  default = null
-}
-
-variable "ssh_cidrs" {
-  type    = list(string)
-  default = []
-}
-
-variable "grid_cidrs" {
-  type    = list(string)
-  default = ["0.0.0.0/0"]
-}
-
-variable "create_iam_role" {
-  type    = bool
-  default = false
-}
-
-variable "create_eip" {
-  type    = bool
-  default = false
-}
-
-variable "create_route53" {
-  type    = bool
-  default = false
-}
-
-variable "hosted_zone_id" {
-  type    = string
-  default = null
-}
-
-variable "dns_name" {
-  type    = string
-  default = null
-}
+variable "create_iam_role"  { type = bool default = false }
+variable "create_eip"       { type = bool default = false }
+variable "create_route53"   { type = bool default = false }
+variable "hosted_zone_id"   { type = string default = null }
+variable "dns_name"         { type = string default = null }
 
 #############
 # Networking
@@ -100,27 +49,16 @@ locals {
   grid_allow = var.grid_cidrs
 }
 
-###########################
-# AMI (Amazon Linux 2023)
-# Prefer NON-ECS AMI; still defensively stop ECS agent in user-data.
-###########################
-data "aws_ami" "al2023" {
-  most_recent = true
-  owners      = ["amazon"]
+############################################
+# AMI: Standard Amazon Linux 2023 (non-ECS)
+############################################
+# SSM parameter always points to the latest standard AL2023 AMI (NOT ECS)
+data "aws_ssm_parameter" "al2023" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+}
 
-  # Non-ECS GA kernel 6.1 images (avoid *ecs* in name)
-  filter {
-    name   = "name"
-    values = [
-      "al2023-ami-2023.*-kernel-6.1-x86_64",
-      "al2023-ami-*-kernel-6.1-x86_64"
-    ]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
+locals {
+  al2023_ami_id = data.aws_ssm_parameter.al2023.value
 }
 
 #####################
@@ -131,7 +69,7 @@ resource "aws_security_group" "grid_sg" {
   description = "Allow Selenium Grid and optional SSH"
   vpc_id      = local.effective_vpc_id
 
-  # SSH 22
+  # SSH 22 (optional)
   dynamic "ingress" {
     for_each = local.ssh_allow
     content {
@@ -176,9 +114,7 @@ resource "aws_security_group" "grid_sg" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = {
-    Name = "${var.name_prefix}-sg"
-  }
+  tags = { Name = "${var.name_prefix}-sg" }
 }
 
 ############
@@ -187,11 +123,7 @@ resource "aws_security_group" "grid_sg" {
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
+    principals { type = "Service", identifiers = ["ec2.amazonaws.com"] }
   }
 }
 
@@ -223,14 +155,13 @@ resource "aws_iam_instance_profile" "grid" {
 # EC2 host
 #############
 resource "aws_instance" "grid" {
-  ami                         = data.aws_ami.al2023.id
+  ami                         = local.al2023_ami_id
   instance_type               = var.instance_type
   key_name                    = var.key_name
   subnet_id                   = local.effective_subnet_id
   vpc_security_group_ids      = [aws_security_group.grid_sg.id]
   associate_public_ip_address = true
-
-  iam_instance_profile = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
+  iam_instance_profile        = var.create_iam_role ? aws_iam_instance_profile.grid[0].name : null
 
   root_block_device {
     volume_size = var.volume_size_gb
@@ -238,48 +169,47 @@ resource "aws_instance" "grid" {
   }
 
   user_data_replace_on_change = true
-
-  # IMPORTANT: plain heredoc (no single quotes), fully valid bash.
   user_data = <<EOF
 #!/bin/bash
 set -euxo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
 echo "[user-data] start $(date -Iseconds)"
 
-# --- If this is an ECS-optimized image, stop/disable ECS so it doesn't own Docker ---
-systemctl stop ecs || true
-systemctl disable ecs || true
-systemctl stop amazon-ecs-agent || true
-systemctl disable amazon-ecs-agent || true
-docker rm -f \$(docker ps -aq --filter "name=ecs-agent") 2>/dev/null || true
+# If this ever lands on an ECS-optimized image, kill the ECS agent to avoid conflicts
+if systemctl list-unit-files | grep -q '^ecs.service'; then
+  echo "[user-data] Disabling ECS agent"
+  systemctl stop ecs || true
+  systemctl disable ecs || true
+fi
 
-# --- Docker & Compose ---
+# Base tooling
 dnf -y makecache
-dnf -y install docker docker-compose-plugin curl wget jq
+dnf -y install docker curl wget jq tar
 
+# Docker engine
 systemctl enable --now docker
+sleep 3
+docker --version || true
 
-# Wait until Docker is really up
-for i in \$(seq 1 20); do
-  if docker info >/dev/null 2>&1; then
-    break
-  fi
-  echo "[user-data] waiting for docker... (\$i/20)"
-  sleep 3
-done
-docker info
+# Docker Compose v2 plugin
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -L "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version || true
 
-# --- Project dirs ---
+# Folders
 mkdir -p /opt/grid/logs/hub /opt/grid/logs/chrome /opt/grid/logs/firefox
 mkdir -p /opt/grid/downloads/chrome /opt/grid/downloads/firefox
 cd /opt/grid
 
-# --- Compose file ---
+# Compose file
 cat > /opt/grid/docker-compose.yml <<'YAML'
 version: "3.9"
 services:
-  hub:
+  selenium-hub:
     image: selenium/hub:4.25.0
+    platform: linux/amd64
     container_name: selenium-hub
     ports:
       - "4444:4444"
@@ -297,15 +227,21 @@ services:
       retries: 60
       start_period: 10s
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   chrome:
     image: selenium/node-chrome:4.25.0
+    platform: linux/amd64
     shm_size: 2gb
     depends_on:
-      hub:
+      selenium-hub:
         condition: service_healthy
     environment:
-      - SE_EVENT_BUS_HOST=hub
+      - SE_EVENT_BUS_HOST=selenium-hub
       - SE_EVENT_BUS_PUBLISH_PORT=4442
       - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
       - SE_NODE_MAX_SESSIONS=1
@@ -319,20 +255,26 @@ services:
     volumes:
       - "./logs/chrome:/opt/selenium/logs"
       - "./downloads/chrome:/home/seluser/Downloads"
-    restart: unless-stopped
     ulimits:
       nofile:
         soft: 32768
         hard: 32768
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   firefox:
     image: selenium/node-firefox:4.25.0
+    platform: linux/amd64
     shm_size: 2gb
     depends_on:
-      hub:
+      selenium-hub:
         condition: service_healthy
     environment:
-      - SE_EVENT_BUS_HOST=hub
+      - SE_EVENT_BUS_HOST=selenium-hub
       - SE_EVENT_BUS_PUBLISH_PORT=4442
       - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
       - SE_NODE_MAX_SESSIONS=1
@@ -344,41 +286,43 @@ services:
     volumes:
       - "./logs/firefox:/opt/selenium/logs"
       - "./downloads/firefox:/home/seluser/Downloads"
-    restart: unless-stopped
     ulimits:
       nofile:
         soft: 32768
         hard: 32768
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
 YAML
 
-echo "[user-data] docker compose pull + up"
+echo "[user-data] docker pull + up"
 docker compose -f /opt/grid/docker-compose.yml pull
 docker compose -f /opt/grid/docker-compose.yml up -d
 
-echo "[user-data] docker ps:"
+echo "[user-data] docker ps after up:"
 docker ps -a
 
-# --- Wait for hub ---
-for i in \$(seq 1 120); do
-  if curl -fsS http://127.0.0.1:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
+# Wait for hub readiness
+echo "[user-data] waiting for hub readiness..."
+for i in $(seq 1 120); do
+  if curl -fsS http://localhost:4444/status | jq -e '.value.ready == true' >/dev/null 2>&1; then
     echo "[user-data] hub is ready"
     exit 0
   fi
-  echo "[user-data] hub not ready yet... (\$i/120)"
   sleep 5
 done
 
-echo "[user-data] hub NOT ready; dump logs"
-curl -v http://127.0.0.1:4444/status || true
-docker logs selenium-hub || true
-docker logs \$(docker ps -aq --filter "name=chrome") || true
-docker logs \$(docker ps -aq --filter "name=firefox") || true
+echo "[user-data] hub NOT ready; last /status:"
+curl -v http://localhost:4444/status || true
+echo "[user-data] docker ps (final):"
+docker ps -a
 exit 1
 EOF
 
-  tags = {
-    Name = "${var.name_prefix}-ec2"
-  }
+  tags = { Name = "${var.name_prefix}-ec2" }
 }
 
 #############
@@ -387,9 +331,7 @@ EOF
 resource "aws_eip" "grid" {
   count  = var.create_eip ? 1 : 0
   domain = "vpc"
-  tags = {
-    Name = "${var.name_prefix}-eip"
-  }
+  tags   = { Name = "${var.name_prefix}-eip" }
 }
 
 resource "aws_eip_association" "grid" {
@@ -404,34 +346,15 @@ resource "aws_route53_record" "grid" {
   name    = var.dns_name
   type    = "A"
   ttl     = 60
-  records = [
-    var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip
-  ]
+  records = [var.create_eip ? aws_eip.grid[0].public_ip : aws_instance.grid.public_ip]
 }
 
 #########
 # Outputs
 #########
-output "public_ip" {
-  value = aws_instance.grid.public_ip
-}
-
-output "public_dns" {
-  value = aws_instance.grid.public_dns
-}
-
-output "instance_id" {
-  value = aws_instance.grid.id
-}
-
-output "security_group_id" {
-  value = aws_security_group.grid_sg.id
-}
-
-output "grid_url" {
-  value = "http://${aws_instance.grid.public_ip}:4444"
-}
-
-output "novnc_url" {
-  value = "http://${aws_instance.grid.public_ip}:7900"
-}
+output "public_ip"         { value = aws_instance.grid.public_ip }
+output "public_dns"        { value = aws_instance.grid.public_dns }
+output "instance_id"       { value = aws_instance.grid.id }
+output "security_group_id" { value = aws_security_group.grid_sg.id }
+output "grid_url"          { value = "http://${aws_instance.grid.public_ip}:4444" }
+output "novnc_url"         { value = "http://${aws_instance.grid.public_ip}:7900" }
