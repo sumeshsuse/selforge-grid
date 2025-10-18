@@ -1,5 +1,8 @@
 <!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
 <suite name="SelforgeGridSuite" parallel="tests" thread-count="1">
+    <listeners>
+        <listener class-name="io.qameta.allure.testng.AllureTestNg"/>
+    </listeners>
     <test name="Chrome">
         <parameter name="browser" value="chrome"/>
         <!-- Optionally pass this if you prefer via TestNG -->

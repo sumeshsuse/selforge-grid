@@ -14,10 +14,11 @@
         <selenium.version>4.25.0</selenium.version>
         <testng.version>7.10.2</testng.version>
         <surefire.version>3.2.5</surefire.version>
+
+        <!-- Allure -->
         <allure.testng.version>2.26.0</allure.testng.version>
         <allure.maven.version>2.12.0</allure.maven.version>
-        <!-- Optional: the Allure REPORT version (not the maven plugin).
-             You can bump this independently if needed. -->
+        <!-- This is the Allure *report UI* version the plugin generates -->
         <allure.report.version>2.29.0</allure.report.version>
     </properties>
 
@@ -29,7 +30,7 @@
             <version>${selenium.version}</version>
         </dependency>
 
-        <!-- TestNG -->
+        <!-- TestNG (tests only) -->
         <dependency>
             <groupId>org.testng</groupId>
             <artifactId>testng</artifactId>
@@ -37,7 +38,7 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Allure binding for TestNG -->
+        <!-- Allure binding for TestNG (tests only) -->
         <dependency>
             <groupId>io.qameta.allure</groupId>
             <artifactId>allure-testng</artifactId>
@@ -45,7 +46,7 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Quiet SLF4J warnings during tests -->
+        <!-- Optional: keep logs quiet during tests -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
@@ -66,7 +67,7 @@
                 </configuration>
             </plugin>
 
-            <!-- Run TestNG suite and forward grid url properties -->
+            <!-- Run TestNG suite and forward grid URL props -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
@@ -76,7 +77,7 @@
                         <suiteXmlFile>testng.xml</suiteXmlFile>
                     </suiteXmlFiles>
                     <systemPropertyVariables>
-                        <!-- These mirror whatever you pass with -D... -->
+                        <!-- Pass through whatever you provide on the CLI -->
                         <grid.url>${grid.url}</grid.url>
                         <GRID_URL>${GRID_URL}</GRID_URL>
                     </systemPropertyVariables>

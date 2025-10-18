@@ -1,18 +1,18 @@
 package ui;
 
+import org.openqa.selenium.By;
+import org.openqa.selenium.Dimension;
+import org.openqa.selenium.Keys;
 import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.chrome.ChromeOptions;
+import org.openqa.selenium.edge.EdgeOptions;
+import org.openqa.selenium.firefox.FirefoxOptions;
 import org.openqa.selenium.remote.RemoteWebDriver;
 import org.testng.Assert;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Optional;
-import org.testng.annotations.Parameters;
+import org.testng.annotations.*;
 
-// Selenium 4 options (prefer over DesiredCapabilities)
-import org.openqa.selenium.chrome.ChromeOptions;
-import org.openqa.selenium.firefox.FirefoxOptions;
-import org.openqa.selenium.edge.EdgeOptions;
-
+import java.net.URI;
 import java.net.URL;
 import java.time.Duration;
 
@@ -20,101 +20,75 @@ public class DuckTest {
 
     private WebDriver driver;
 
-    @BeforeMethod
     @Parameters({"browser", "gridUrl"})
+    @BeforeClass(alwaysRun = true)
     public void setUp(@Optional("chrome") String browser,
-                      @Optional String gridParam) throws Exception {
-
-        // Resolve Grid URL: TestNG param -> system property -> env var
-        String urlProp = firstNonBlank(
-                gridParam,
+                      @Optional String gridUrlFromXml) throws Exception {
+        String gridUrl = pick(
+                gridUrlFromXml,
                 System.getProperty("grid.url"),
                 System.getProperty("GRID_URL"),
                 System.getenv("GRID_URL")
         );
 
-        if (isBlank(urlProp)) {
+        if (gridUrl == null || gridUrl.isBlank()) {
             throw new IllegalStateException(
-                    "GRID URL is missing. Provide one via TestNG parameter 'gridUrl', " +
-                            "or set -Dgrid.url / -DGRID_URL, or env GRID_URL. " +
-                            "Example: http://<alb-dns-or-ip>:4444"
-            );
+                    "GRID URL is missing. Pass -Dgrid.url=http://host:4444 or TestNG param 'gridUrl'.");
         }
 
-        URL gridUrl = new URL(urlProp);
-
-        // Normalize browser name
-        String b = isBlank(browser) ? "chrome" : browser.trim().toLowerCase();
-
-        // Build Selenium 4 Options (avoids deprecated DesiredCapabilities)
-        switch (b) {
-            case "firefox": {
-                FirefoxOptions options = new FirefoxOptions();
-                // options.addArguments("-headless"); // uncomment if you only run headless
-                driver = new RemoteWebDriver(gridUrl, options);
-                break;
-            }
-            case "edge": {
-                EdgeOptions options = new EdgeOptions();
-                driver = new RemoteWebDriver(gridUrl, options);
-                break;
-            }
-            case "chrome":
-            default: {
-                ChromeOptions options = new ChromeOptions();
-                // options.addArguments("--headless=new"); // uncomment if you only run headless
-                driver = new RemoteWebDriver(gridUrl, options);
-                break;
-            }
-        }
-
-        // Basic timeouts
-        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10));
-        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(60));
-        driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(30));
+        URL remote = URI.create(gridUrl.trim()).toURL();
+        driver = new RemoteWebDriver(remote, optionsFor(browser));
+        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(3));
+        driver.manage().window().setSize(new Dimension(1280, 900));
     }
 
-    @AfterMethod(alwaysRun = true)
-    public void tearDown() {
-        if (driver != null) {
-            try {
-                driver.quit();
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
-    // --- Sample tests ---
-
-    @org.testng.annotations.Test
-    public void searchDuckDuckGoHome() {
+    @Test
+    public void duckSearch() {
         driver.get("https://duckduckgo.com/");
-        Assert.assertTrue(
-                driver.getTitle().toLowerCase().contains("duck"),
-                "Title should mention 'duck'"
-        );
-    }
+        WebElement box = driver.findElement(By.name("q"));
+        box.sendKeys("Selenium Grid");
+        box.sendKeys(Keys.ENTER);
 
-    @org.testng.annotations.Test
-    public void openExampleDotCom() {
-        driver.get("https://example.com/");
-        Assert.assertTrue(
-                driver.getTitle().toLowerCase().contains("example"),
-                "Title should mention 'example'"
-        );
-    }
-
-    // --- helpers ---
-
-    private static boolean isBlank(String s) {
-        return s == null || s.trim().isEmpty();
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) return null;
-        for (String v : values) {
-            if (!isBlank(v)) return v;
+        // quick-n-simple wait loop (kept tiny on purpose)
+        long end = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < end) {
+            if (driver.getTitle().toLowerCase().contains("selenium")) break;
+            sleep(200);
         }
+        Assert.assertTrue(driver.getTitle().toLowerCase().contains("selenium"),
+                "Title should contain 'selenium'");
+    }
+
+    @Test(dependsOnMethods = "duckSearch")
+    public void exampleDotComHasHeading() {
+        driver.get("https://example.com/");
+        String h1 = driver.findElement(By.tagName("h1")).getText();
+        Assert.assertTrue(h1.toLowerCase().contains("example"),
+                "H1 should contain 'Example'");
+    }
+
+    @AfterClass(alwaysRun = true)
+    public void tearDown() {
+        if (driver != null) driver.quit();
+    }
+
+    // ---------- helpers ----------
+    private static org.openqa.selenium.Capabilities optionsFor(String name) {
+        String b = (name == null ? "chrome" : name).trim().toLowerCase();
+        switch (b) {
+            case "chrome":  return new ChromeOptions().setAcceptInsecureCerts(true);
+            case "firefox": return new FirefoxOptions().setAcceptInsecureCerts(true);
+            case "edge":    return new EdgeOptions().setAcceptInsecureCerts(true);
+            default: throw new IllegalArgumentException("Unsupported browser: " + name);
+        }
+    }
+
+    private static String pick(String... vals) {
+        for (String v : vals) if (v != null && !v.trim().isEmpty()) return v;
         return null;
+    }
+
+    private static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }
 }
