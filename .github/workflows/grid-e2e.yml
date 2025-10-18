@@ -18,7 +18,7 @@ on:
       - "src/**"
       - "pom.xml"
       - "testng.xml"
-      - ".github/workflows/grid-e2e.yml"
+      - ".github/workflows/grid-e2e.yml"  # change this if your file is main.yml
 
 concurrency:
   group: grid-e2e-${{ github.ref }}
