@@ -18,7 +18,7 @@ on:
       - "src/**"
       - "pom.xml"
       - "testng.xml"
-      - ".github/workflows/grid-e2e.yml"
+      - ".github/workflows/grid-e2e.yml"  # change this if your file is main.yml
 
 concurrency:
   group: grid-e2e-${{ github.ref }}
@@ -42,7 +42,7 @@ jobs:
       id-token: write
       contents: read
     outputs:
-      grid_url:  ${{ steps.out.outputs.grid_url }}
+      grid_url:  ${{ steps.norm.outputs.grid_url }}
       public_ip: ${{ steps.out.outputs.public_ip }}
       novnc_url: ${{ steps.out.outputs.novnc_url }}
     steps:
@@ -138,9 +138,25 @@ jobs:
           echo "public_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
           echo "novnc_url=$(terraform output -raw novnc_url)" >> $GITHUB_OUTPUT
 
+      - name: Normalize GRID_URL (ensure scheme, strip slash)
+        id: norm
+        run: |
+          set -e
+          RAW="${{ steps.out.outputs.grid_url }}"
+          if [ -z "$RAW" ]; then
+            echo "No grid_url from Terraform." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$RAW" | grep -qiE '^https?://'; then
+            RAW="http://$RAW"
+          fi
+          RAW="${RAW%/}"
+          echo "GRID_URL=$RAW" >> "$GITHUB_ENV"
+          echo "grid_url=$RAW" >> "$GITHUB_OUTPUT"
+
       - name: Echo URLs
         run: |
-          echo "Grid:  ${{ steps.out.outputs.grid_url }}"
+          echo "Grid:  ${{ steps.norm.outputs.grid_url }}"
           echo "noVNC: ${{ steps.out.outputs.novnc_url }}"
 
   run_tests:
@@ -159,24 +175,34 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Verify GRID_URL present
-        run: |
-          echo "GRID_URL=${GRID_URL}"
-          if [ -z "${GRID_URL}" ]; then
-            echo "GRID_URL is empty; aborting tests." >&2
-            exit 1
-          fi
+      - name: Show URL being used
+        run: echo "GRID_URL=${GRID_URL}"
 
-      - name: Quick Grid health (best-effort)
+      - name: Wait for Selenium Grid to be ready (up to 5 minutes)
         run: |
-          curl -sS "${GRID_URL}/status" || true
+          set -e
+          URL="${GRID_URL%/}"
+          for i in $(seq 1 60); do
+            READY="$(curl -fsS "$URL/status" | jq -r '.value.ready // .ready // empty' || true)"
+            if [ "$READY" = "true" ]; then
+              echo "✅ Grid is ready."
+              exit 0
+            fi
+            echo "⏳ Waiting for Grid to be ready… ($i/60)"
+            sleep 5
+          done
+          echo "❌ Grid did not become ready in time. Last /status:"
+          curl -v "$URL/status" || true
+          exit 1
 
       - name: Build & run tests (Maven)
         run: |
+          URL="${GRID_URL%/}"
           mvn -B \
-            -Dgrid.url="$GRID_URL" \
-            -DgridUrl="$GRID_URL" \
-            -DGRID_URL="$GRID_URL" \
+            -Dgrid.url="$URL" \
+            -DgridUrl="$URL" \
+            -DGRID_URL="$URL" \
+            -Dwebdriver.remote.url="$URL/wd/hub" \
             test
 
       - name: Archive TestNG reports (always)
