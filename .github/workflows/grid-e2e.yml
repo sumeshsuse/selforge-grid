@@ -150,6 +150,9 @@ jobs:
     name: Run Selenium Tests
     runs-on: ubuntu-latest
     needs: terraform_apply
+    permissions:            # <-- added so OIDC can assume the role
+      id-token: write
+      contents: read
     env:
       GRID_URL:  ${{ needs.terraform_apply.outputs.grid_url }}
       PUBLIC_IP: ${{ needs.terraform_apply.outputs.public_ip }}
