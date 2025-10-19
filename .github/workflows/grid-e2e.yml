@@ -149,23 +149,119 @@ jobs:
         env:
           GRID_URL: ${{ steps.tfout.outputs.grid_url }}
         run: |
-          # Ensure Allure results go where the plugin expects
           mvn -B -Dgrid.url="$GRID_URL" -Dallure.results.directory=target/allure-results test
           echo "---- After tests, results tree ----"
           ls -la target || true
           ls -la target/allure-results || true
 
-      # --- Allure HTML build & S3 publish ------------------------------------
+      # --- Allure HTML build --------------------------------------------------
 
       - name: Build Allure HTML
         if: always()
         run: |
-          # Build report even if tests failed; fail loudly if results are missing
           if [ ! -d target/allure-results ] || [ -z "$(ls -A target/allure-results 2>/dev/null)" ]; then
             echo "❌ No Allure results in target/allure-results; cannot build report."
             exit 1
           fi
           mvn -B -Dallure.results.directory=target/allure-results io.qameta.allure:allure-maven:report
+
+      # --- NEW: Extract Allure metrics → CSV for QuickSight -------------------
+
+      - name: Extract Allure metrics CSVs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPORT_DIR="target/site/allure-maven"
+          RESULTS_DIR="target/allure-results"
+
+          # test-level file
+          OUT_TESTS="allure-tests.csv"
+          echo "run_id,test_name,status,start,stop,duration_ms,package,suite,testClass,fullName" > "$OUT_TESTS"
+
+          get_label() {
+            local file="$1" key="$2"
+            jq -r --arg k "$key" '
+              (.labels // []) | map(select(.name==$k)) | .[0].value // ""
+            ' "$file"
+          }
+
+          shopt -s nullglob
+          for f in "$RESULTS_DIR"/*-result.json; do
+            name=$(jq -r '.name // ""' "$f")
+            status=$(jq -r '.status // ""' "$f")
+            start=$(jq -r '.start // 0' "$f")
+            stop=$(jq -r '.stop // 0' "$f")
+            duration=$(( stop>start ? stop-start : 0 ))
+            package=$(get_label "$f" "package")
+            suite=$(get_label "$f" "suite")
+            testClass=$(get_label "$f" "testClass")
+            fullName=$(jq -r '.fullName // ""' "$f")
+            # very simple CSV escaping (values are usually clean)
+            echo "${GITHUB_RUN_ID},\"$name\",$status,$start,$stop,$duration,\"$package\",\"$suite\",\"$testClass\",\"$fullName\"" >> "$OUT_TESTS"
+          done
+
+          # run summary file (from report widgets)
+          OUT_SUM="allure-summary.csv"
+          W_SUM="$REPORT_DIR/widgets/summary.json"
+          echo "run_id,total,passed,failed,broken,skipped,unknown" > "$OUT_SUM"
+          if [ -f "$W_SUM" ]; then
+            jq -r --arg rid "$GITHUB_RUN_ID" '
+              [$rid,
+               (.statistic.total // 0),
+               (.statistic.passed // 0),
+               (.statistic.failed // 0),
+               (.statistic.broken // 0),
+               (.statistic.skipped // 0),
+               (.statistic.unknown // 0)
+              ] | @csv
+            ' "$W_SUM" >> "$OUT_SUM"
+          else
+            echo "$GITHUB_RUN_ID,0,0,0,0,0,0" >> "$OUT_SUM"
+          fi
+
+      - name: Upload metrics CSVs to S3 for QuickSight
+        if: always()
+        env:
+          BUCKET: ${{ secrets.REPORTS_BUCKET }}
+          RUN_PREFIX: grid/allure/${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -e
+          if [ -z "${BUCKET}" ]; then
+            echo "ℹ️ REPORTS_BUCKET not set; skipping CSV publish."
+            exit 0
+          fi
+          DATA_PREFIX="grid/allure/datasets"
+          aws s3 cp allure-tests.csv   "s3://${BUCKET}/${DATA_PREFIX}/${RUN_PREFIX}-tests.csv"
+          aws s3 cp allure-summary.csv "s3://${BUCKET}/${DATA_PREFIX}/${RUN_PREFIX}-summary.csv"
+          aws s3 cp allure-tests.csv   "s3://${BUCKET}/${DATA_PREFIX}/latest-tests.csv"
+          aws s3 cp allure-summary.csv "s3://${BUCKET}/${DATA_PREFIX}/latest-summary.csv"
+
+          # QS manifests (one-time path; runner overwrites)
+          cat > manifest-tests.json <<EOF
+          {
+            "fileLocations": [{"URIs": ["s3://${BUCKET}/${DATA_PREFIX}/latest-tests.csv"]}],
+            "globalUploadSettings": {"format":"CSV","delimiter":",","textqualifier":"\"","containsHeader":true}
+          }
+          EOF
+          cat > manifest-summary.json <<EOF
+          {
+            "fileLocations": [{"URIs": ["s3://${BUCKET}/${DATA_PREFIX}/latest-summary.csv"]}],
+            "globalUploadSettings": {"format":"CSV","delimiter":",","textqualifier":"\"","containsHeader":true}
+          }
+          EOF
+          aws s3 cp manifest-tests.json   "s3://${BUCKET}/${DATA_PREFIX}/manifest-tests.json"
+          aws s3 cp manifest-summary.json "s3://${BUCKET}/${DATA_PREFIX}/manifest-summary.json"
+
+          {
+            echo "## QuickSight datasets"
+            echo ""
+            echo "- Tests manifest:   s3://${BUCKET}/${DATA_PREFIX}/manifest-tests.json"
+            echo "- Summary manifest: s3://${BUCKET}/${DATA_PREFIX}/manifest-summary.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- Publish Allure HTML to S3 (versioned + latest) ---------------------
 
       - name: Publish Allure to S3 (versioned + latest)
         if: always()
@@ -190,18 +286,16 @@ jobs:
 
           aws s3 sync "$SRC" "s3://$BUCKET/$RUN_PREFIX" \
             --delete --cache-control "no-cache" --metadata-directive REPLACE
-
           aws s3 sync "$SRC" "s3://$BUCKET/grid/allure/latest" \
             --delete --cache-control "no-cache" --metadata-directive REPLACE
 
           VER_S3="s3://$BUCKET/$RUN_PREFIX/index.html"
           LATEST_S3="s3://$BUCKET/grid/allure/latest/index.html"
-
           VER_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${RUN_PREFIX}/index.html"
           LATEST_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/grid/allure/latest/index.html"
 
-          echo "Versioned (S3): $VER_S3"
-          echo "Latest   (S3): $LATEST_S3"
+          echo "Versioned (S3):   $VER_S3"
+          echo "Latest   (S3):   $LATEST_S3"
           echo "Versioned (HTTPS): $VER_URL"
           echo "Latest   (HTTPS): $LATEST_URL"
 
@@ -222,8 +316,6 @@ jobs:
           path: target/site/allure-maven
           if-no-files-found: warn
           retention-days: 7
-
-      # -----------------------------------------------------------------------
 
       - name: Always destroy infra
         if: always()
