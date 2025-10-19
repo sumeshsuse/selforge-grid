@@ -1,138 +1,139 @@
-Selforge Grid: Selenium on AWS Fargate + Allure Reports (CI/CD)
+**Selforge Grid: Selenium on AWS Fargate + Allure Reports (CI/CD)**
 
-Spin up a temporary Selenium Grid (standalone Chrome) on AWS Fargate, run TestNG tests from GitHub Actions, generate Allure HTML reports, and publish them to S3. Infra is created → tested → destroyed in one workflow.
+Spin up a temporary Selenium Grid (standalone Chrome) on AWS Fargate, run TestNG tests from GitHub Actions, generate Allure HTML reports, and publish them to Amazon S3.
+The entire lifecycle — create → test → report → destroy — happens automatically in one workflow.
 
-✅ Designed for learning + demo + lightweight daily runs.
-🔒 Uses GitHub OIDC to assume an AWS role (no long-lived keys).
-📈 Optional: export Allure results CSVs for QuickSight dashboards.
+✅ Highlights
 
-Architecture (at a glance)
+🧪 Designed for learning, demo, and lightweight daily runs
 
-Terraform (modules) creates:
+🔒 Uses GitHub OIDC to assume an AWS IAM role (no long-lived credentials)
 
-VPC-default ALB with listeners:
+📊 Exports Allure results CSVs for optional Amazon QuickSight dashboards
 
-:80 → Grid (/status, sessions)
+🏗️ **Architecture Overview**
+Terraform (Modular Infrastructure)
+
+Default VPC + ALB with listeners:
+
+:80 → Selenium Grid (/status, sessions)
 
 :7900 → noVNC (live browser)
 
 ECS Fargate Service running selenium/standalone-chrome:4.25.0
 
-Security groups, IAM roles, CloudWatch logs
+Security Groups, IAM Roles, CloudWatch Logs
 
-GitHub Actions job:
+GitHub Actions CI/CD
 
-Assumes AWS role via OIDC
+Assumes AWS Role via OIDC
 
-terraform apply (Fargate Grid)
+Runs terraform apply to spin up Fargate Grid
 
-Runs Maven/TestNG pointing to the Grid URL
+Executes Maven/TestNG tests against Grid URL
 
-Builds Allure HTML and publishes to S3
+Builds Allure HTML Report
 
-(Optional) emits CSV summaries for analytics
+Publishes reports to S3 (versioned + latest)
 
-Tears down infra (terraform destroy)
+(Optional) Uploads CSV results for analytics
 
-Repo layout
+Cleans up infra with terraform destroy
+
+📁 Repository Structure
 .
-├── iac/                            # Terraform (modular)
+**├── iac/                            # Terraform (modular)
 │   ├── main.tf                     # Root composition
 │   ├── variables.tf
 │   ├── outputs.tf
 │   └── modules/
 │       ├── networking/             # SGs, ALB, listeners, target groups
-│       ├── ecs/                    # Cluster, roles, task def, service
+│       ├── ecs/                    # Cluster, roles, task definition, service
 │       └── observability/          # CloudWatch logs (optional)
-├── src/test/java/ui/DuckTest.java  # Sample TestNG test
-├── testng.xml                      # Suites (Chrome / Firefox etc.)
-├── pom.xml                         # Selenium + TestNG + Allure setup
-└── .github/workflows/e2e.yml       # CI: Fargate → Tests → Allure → Destroy
+├── src/test/java/ui/DuckTest.java  # Sample Selenium TestNG test
+├── testng.xml                      # Test suite (Chrome / Firefox etc.)
+├── pom.xml                         # Maven config (Selenium + TestNG + Allure)
+└── .github/workflows/e2e.yml       # CI: Fargate → Tests → Allure → Destroy**
 
-Prerequisites
+**⚙️ Prerequisites**
 
-AWS account with permissions to create ECS/ALB/S3/DynamoDB/IAM roles
+AWS Account with permissions for ECS, ALB, S3, DynamoDB, and IAM
 
-GitHub repo with:
+GitHub Repository with:
 
-Actions enabled
+GitHub Actions enabled
 
-OIDC trust to assume a role in your AWS account
+OIDC trust to assume a role in AWS
 
-S3 bucket for reports (e.g. reports-<env>-<region>)
+S3 Bucket for reports → e.g. reports-<env>-<region>
 
-Optional: S3 Static Website Hosting + bucket policy for public read
+(Optional) Enable Static Website Hosting for public viewing
 
-Terraform state backend (S3 + DynamoDB lock table), or use local for learning
+Terraform backend (S3 + DynamoDB for remote state)
 
-Secrets & config (GitHub → Settings → Secrets and variables → Actions)
-
-Create these repository secrets:
-
-Name	Example / Notes
-AWS_ROLE_TO_ASSUME	arn:aws:iam::<ACCOUNT_ID>:role/GitHubActionsRole (OIDC-trusted)
+🔐** GitHub Secrets Configuration**
+Secret Name	Example Value / Description
+AWS_ROLE_TO_ASSUME	arn:aws:iam::<ACCOUNT_ID>:role/GitHubActionsRole (OIDC trusted)
 TF_STATE_BUCKET	tf-state-<env>-<region>
 TF_STATE_REGION	us-east-1
 TF_STATE_LOCK_TABLE	tf-state-locks
 REPORTS_BUCKET	reports-<env>-<region>
 
-Tip: if you don’t want public reports, skip static website hosting and just use the HTTPS object URL (requires auth/presign).
+💡 If you prefer private reports, skip static website hosting and use the S3 HTTPS object URL (requires authentication).
 
-How to run (CI)
+🧪 **How to Run the Pipeline**
 
-Push to main or run manually: Actions → “Grid E2E (Fargate → Tests → Destroy)” → Run workflow.
+Trigger the workflow:
 
-The job will:
+Push to the main branch, or
 
-terraform apply to bring up the Grid
+Manually from GitHub Actions → “Grid E2E (Fargate → Tests → Destroy)” → Run Workflow
 
-run tests against GRID_URL output
+Pipeline steps:
 
-build Allure HTML
+terraform apply → creates Selenium Grid infra
 
-publish to S3 at:
+Runs Selenium tests via TestNG
 
-Versioned: s3://<REPORTS_BUCKET>/grid/allure/<runId>-<attempt>/index.html
+Builds Allure HTML reports
 
-Rolling latest: s3://<REPORTS_BUCKET>/grid/allure/latest/index.html
+Publishes reports to:
 
-print HTTPS links in the job summary
+📘 Versioned: s3://<REPORTS_BUCKET>/grid/allure/<runId>-<attempt>/index.html
 
-Local development (optional)
+🔁 Latest: s3://<REPORTS_BUCKET>/grid/allure/latest/index.html
 
-You can run tests locally without Fargate using a local Selenium:
+Destroys infra automatically after test run
 
-# 1) Start Selenium locally (example via Docker):
-docker run --rm -p 4444:4444 -p 7900:7900 \
-  selenium/standalone-chrome:4.25.0
+💻 Run Tests Locally (Optional)
 
-# 2) Execute tests pointing to local Grid:
+You can run the same tests locally using Docker:
+
+# 1️⃣ Start Selenium Grid locally
+docker run --rm -p 4444:4444 -p 7900:7900 selenium/standalone-chrome:4.25.0
+
+# 2️⃣ Run tests pointing to the local Grid
 mvn -Dgrid.url="http://localhost:4444" test
 
-# 3) Build Allure HTML report:
+# 3️⃣ Generate Allure HTML report
 mvn io.qameta.allure:allure-maven:report
 
-# 4) Open:
+# 4️⃣ Open the report
 open target/site/allure-maven/index.html
 
-Test framework details
+🧩 Test Framework Stack
+Tool	Version	Purpose
+Selenium	4.25.0	Browser automation
+TestNG	7.10.2	Test orchestration
+Allure	latest	Rich HTML reporting
 
-Selenium: 4.25.0
+Key Paths:
 
-TestNG: 7.10.2
+Allure Results → target/allure-results
 
-Allure:
+Allure HTML → target/site/allure-maven
 
-TestNG listener: io.qameta.allure:allure-testng
-
-Maven plugin: io.qameta.allure:allure-maven
-
-Results dir: target/allure-results
-
-Report dir: target/site/allure-maven
-
-testng.xml (example with two Chrome tests in parallel):
-
+🧾 Example testng.xml (2 Chrome tests in parallel)
 <!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
 <suite name="SelforgeGridSuite" parallel="tests" thread-count="2">
   <listeners>
@@ -155,108 +156,50 @@ testng.xml (example with two Chrome tests in parallel):
 </suite>
 
 
-If you later add Firefox in infra, add <test name="Firefox"> with browser=firefox.
+🔄 Add <test name="Firefox"> with browser=firefox when your infra supports it.
 
-Allure to S3 (what you’ll see)
+☁️ Allure Report in S3
 
 The workflow:
 
-Runs tests with results in target/allure-results
+Runs tests and stores results in target/allure-results
 
-Builds HTML to target/site/allure-maven
+Builds HTML into target/site/allure-maven
 
-Syncs the HTML to S3 (versioned + latest)
+Uploads the HTML to S3 (versioned and latest)
 
-Prints HTTPS URLs in the job summary
+Prints direct URLs in the job summary
 
-If you enable Static Website Hosting on the bucket and add a public read policy (only if acceptable), you can open:
+Access options:
+
+Static Website URL (public):
 
 http://<bucket>.s3-website-<region>.amazonaws.com/grid/allure/latest/index.html
 
 
-Otherwise, use the standard HTTPS URL (requires auth or presigned URL):
+Private HTTPS (recommended):
 
 https://<bucket>.s3.<region>.amazonaws.com/grid/allure/latest/index.html
 
-Optional: QuickSight analytics
+📊 Optional: QuickSight Analytics Integration
 
-The workflow also emits CSV files you can ingest into QuickSight:
+The workflow generates two CSV files:
 
-allure-tests.csv — per-test rows: name, status, timings, class/package, etc.
+allure-tests.csv — detailed test data (name, status, duration, etc.)
 
-allure-summary.csv — run totals: passed/failed/broken/skipped.
+allure-summary.csv — high-level summary (total, passed, failed, skipped)
 
-Two easy ingestion patterns:
+Integration options:
 
-Push CSVs to S3 (recommended)
+Automatic via S3
 
-Add an Action step to aws s3 cp both CSVs to s3://<reports-bucket>/grid/analytics/<runId>/
+Add a GitHub step to upload CSVs to:
+s3://<REPORTS_BUCKET>/grid/analytics/<runId>/
 
-In QuickSight: New dataset → S3 → manifest pointing to that prefix
+In QuickSight → “New Dataset → S3 → Upload manifest”
 
 Manual upload
 
-Download artifacts from the run (allure-html and CSVs)
+Download artifacts (allure-html + CSVs)
 
-Upload the CSVs directly as datasets in QuickSight
-
-Cost notes
-
-Fargate: charged by vCPU/GB-hour while the task runs (short test windows → pennies)
-
-ALB: hourly + LCU during runtime
-
-S3: storage + requests (tiny for HTML + CSVs)
-
-DynamoDB (state lock): on-demand, pennies
-
-CloudWatch Logs: a few MB per run
-
-Runs that create → test → destroy are very low cost.
-
-Troubleshooting
-
-“Allure report folder not found”
-
-Ensure tests generated results in target/allure-results
-
-The workflow already passes -Dallure.results.directory=target/allure-results
-
-Can’t open …amazonaws.com/index.html
-
-You’re using the object endpoint (not a website). Either:
-
-use a presigned URL, or
-
-enable Static Website Hosting + bucket policy for public read, or
-
-open via AWS Console while authenticated
-
-Firefox tests not starting
-
-Task image is standalone-chrome. Switch to a custom grid or a Firefox/Distributed grid image and expose the right ports.
-
-Destroy on failure
-
-The workflow uses if: always() to destroy infra in the last step.
-
-Security / redaction for public posts
-
-Before sharing logs/screenshots publicly, replace:
-
-Account IDs → 1234-5678-9012
-
-Role ARNs → arn:aws:iam::<ACCOUNT_ID>:role/GitHubActionsRole
-
-Bucket names → reports-<env>-<region>
-
-ALB URLs → http://<alb-dns> and http://<alb-dns>:7900
-
-Never post access keys, tokens, or full console links with your account ID.
-
-Cleanup
-
-If you created any persistent resources manually (e.g., S3 state bucket, DynamoDB lock table, reports bucket), delete them when done:
-
-aws s3 rb s3://reports-<env>-<region> --force
-aws dynamodb delete-table --table-name tf-state-locks
+Upload directly as QuickSight datasets
